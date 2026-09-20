@@ -187,17 +187,76 @@ def _result_row(name: Any, term: Any, docket: Any, year: Any) -> str:
     return f"- **{name or '(untitled)'}** \u2014 Term {term or '?'}, No. {docket or '?'}{suffix}"
 
 
+def _case_path(c: dict) -> str:
+    """The case's own path on Oyez, e.g. '1940-1955/347us483'.
+
+    Oyez addresses a case by Term and a path segment, and that segment is the
+    docket number only some of the time. In the bucketed historical Terms
+    (1789-1850, 1850-1900, 1900-1940, 1940-1955) it is volume-us-page instead:
+    Brown I is 1940-1955/347us483, not 1940-1955/1. The Term can differ from
+    the one the record reports as well -- Bakke reads "Term 1977" and lives at
+    1979/76-811. Only 'href' knows, so read it from there and compose nothing.
+    """
+    href = str(c.get("href") or "")
+    marker = "/cases/"
+    i = href.find(marker)
+    return href[i + len(marker):].strip("/") if i != -1 else ""
+
+
+def _site_url(c: dict, term: str, docket: str) -> str:
+    """The oyez.org address a person can open, taken from the API's href.
+
+    Worth composing from href rather than from Term and docket, because
+    oyez.org answers 200 with the same single-page shell for every path under
+    /cases/. A wrong address here does not 404; it renders an empty page.
+    """
+    path = _case_path(c) or f"{c.get('term', term)}/{c.get('docket_number', docket)}"
+    return f"https://www.oyez.org/cases/{path}"
+
+
 async def _fetch_case(term: str, docket: str) -> dict:
     """Fetch and validate a single case object.
 
     Oyez answers a missing Term/docket with HTTP 200 and a JSON array (not a
     404), so a plain _get would hand back a list. Normalize that to a clear
     'not found' error.
+
+    A pair that search_cases printed can still miss here, because search
+    reports the docket number while Oyez may address the case by
+    volume-us-page (see _case_path). So try once more: look the docket up in
+    that Term's case list, which is cached, and fetch the case by its own path.
+    Where two cases share a docket -- Brown I and Brown II are both "No. 1" --
+    there is no right guess, so name both and let the caller choose.
     """
     data = await _get(f"{API}/cases/{term}/{docket}")
-    if not isinstance(data, dict) or not (data.get("name") or data.get("ID")):
-        raise OyezError(f"No case found at Term {term}, docket {docket}.")
-    return data
+    if isinstance(data, dict) and (data.get("name") or data.get("ID")):
+        return data
+
+    try:
+        matches = [c for c in await _term_cases(term)
+                   if _norm_docket(c.get("docket_number")) == _norm_docket(docket)]
+    except OyezError:
+        matches = []
+    matches = [c for c in matches if _case_path(c)]
+
+    if len(matches) == 1:
+        found = await _get(f"{API}/cases/{_case_path(matches[0])}")
+        if isinstance(found, dict) and (found.get("name") or found.get("ID")):
+            return found
+    elif len(matches) > 1:
+        shown, rest = matches[:8], len(matches) - 8
+        choices = "; ".join(
+            f"{c.get('name') or '(untitled)'} -> {_case_path(c).split('/', 1)[-1]}"
+            for c in shown
+        )
+        if rest > 0:
+            choices += f"; and {rest} more"
+        raise OyezError(
+            f"Term {term} has more than one case at docket {docket}, and Oyez "
+            f"addresses them separately: {choices}. Pass one of those as the docket."
+        )
+
+    raise OyezError(f"No case found at Term {term}, docket {docket}.")
 
 
 # --------------------------------------------------------------------------- #
@@ -391,9 +450,19 @@ async def get_case(term: str, docket: str) -> str:
     vote breakdown and opinion authors, the advocates, and a list of the
     available oral-argument and opinion-announcement audio.
 
+    The "Links" line is the address to cite or open. Take it as printed rather
+    than building one from the Term and docket: oyez.org serves the same
+    single-page shell for every path under /cases/, so a composed address that
+    is wrong still answers 200 and renders an empty page.
+
     Args:
         term: The Term year, e.g. "2014" (from search_cases).
-        docket: The docket number, e.g. "14-556" (from search_cases).
+        docket: The docket number, e.g. "14-556" (from search_cases). Older
+            cases sit in bucketed Terms (1789-1850, 1850-1900, 1900-1940,
+            1940-1955) where Oyez addresses a case by volume-us-page instead,
+            e.g. term "1940-1955", docket "347us483" for Brown. The docket
+            number search_cases printed is tried first and usually works; when
+            two cases share one, the error names both addresses.
     """
     try:
         c = await _fetch_case(term, docket)
@@ -504,26 +573,29 @@ def _format_case(c: dict, term: str, docket: str) -> str:
     oa = c.get("oral_argument_audio") or []
     op = c.get("opinion_announcement") or []
     audio = []
+    # Hand back the Term and segment Oyez itself uses, so the suggested call
+    # works even where the docket number is ambiguous or is not the address.
+    path = _case_path(c)
+    a_term, a_docket = (path.split("/", 1) if "/" in path
+                        else (c.get("term", term), c.get("docket_number", docket)))
     if oa:
         titles = "; ".join(m.get("title", "Oral Argument") for m in oa if m)
         audio.append(
             f"- Oral argument ({len(oa)} session(s)): {titles}\n"
-            f"  -> get_oral_argument(term=\"{c.get('term', term)}\", docket=\"{c.get('docket_number', docket)}\")"
+            f"  -> get_oral_argument(term=\"{a_term}\", docket=\"{a_docket}\")"
         )
     if op:
         titles = "; ".join(m.get("title", "Opinion Announcement") for m in op if m)
         audio.append(
             f"- Opinion announcement ({len(op)}): {titles}\n"
-            f"  -> get_opinion_announcement(term=\"{c.get('term', term)}\", docket=\"{c.get('docket_number', docket)}\")"
+            f"  -> get_opinion_announcement(term=\"{a_term}\", docket=\"{a_docket}\")"
         )
     if audio:
         out.append("\n## Audio & transcripts\n" + "\n".join(audio))
 
     # Links
     links = []
-    t = c.get("term", term)
-    d = c.get("docket_number", docket)
-    links.append(f"- Oyez: https://www.oyez.org/cases/{t}/{d}")
+    links.append(f"- Oyez: {_site_url(c, term, docket)}")
     if c.get("justia_url"):
         links.append(f"- Justia: {c['justia_url']}")
     out.append("\n## Links\n" + "\n".join(links))

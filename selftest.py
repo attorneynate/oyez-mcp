@@ -59,6 +59,32 @@ async def main():
                 sys.exit(f"FAIL  search_cases({docket!r}) did not return {name!r}:\n{out}")
             print(f"OK  search_cases finds a Term {term} case by docket ({name}, No. {docket})")
 
+            # oyez.org answers 200 with the same shell for every /cases/ path, so a
+            # composed address renders an empty page instead of failing. The link
+            # has to come from the API's href: Brown I is 1940-1955/347us483, and
+            # its docket number ("1") would have built a live-looking dead link.
+            out = text_of(await session.call_tool(
+                "get_case", {"term": "1940-1955", "docket": "347us483"}))
+            if "https://www.oyez.org/cases/1940-1955/347us483" not in out:
+                sys.exit("FAIL  get_case did not link Brown I by its own path:\n" + out)
+            print("OK  a bucketed-Term case links to its own path, not its docket number")
+
+            # Bakke reports "Term 1977" and lives at 1979/76-811, so the pair
+            # search_cases prints does not resolve on its own.
+            out = text_of(await session.call_tool(
+                "get_case", {"term": "1977", "docket": "76-811"}))
+            if "Bakke" not in out or "/cases/1979/76-811" not in out:
+                sys.exit("FAIL  get_case(1977, 76-811) did not recover Bakke:\n" + out)
+            print("OK  a Term/docket pair resolves even where the case path differs")
+
+            # Brown I and Brown II are both "No. 1" in the same Term. There is no
+            # right guess, so the error has to name both addresses.
+            out = text_of(await session.call_tool(
+                "get_case", {"term": "1940-1955", "docket": "1"}))
+            if "347us483" not in out or "349us294" not in out:
+                sys.exit("FAIL  an ambiguous docket did not name both cases:\n" + out)
+            print("OK  an ambiguous docket names both addresses instead of guessing")
+
             # A turn longer than max_chars used to be dropped whole, so a low cap on
             # one long announcement returned no text at all.
             r = await session.call_tool(

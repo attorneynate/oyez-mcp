@@ -24,6 +24,17 @@ Data comes from the public Oyez API (`api.oyez.org`) and Oyez's search backend
 Every tool is keyed on the pair **Term + docket** (`"2014"`, `"14-556"`) — that is
 what `search_cases` returns and what the other four take. Start there.
 
+Older cases sit in bucketed Terms — `1789-1850`, `1850-1900`, `1900-1940`,
+`1940-1955` — where Oyez addresses a case by volume-us-page rather than by docket
+number: *Brown v. Board* is `1940-1955` + `347us483`. The docket number
+`search_cases` prints is tried first and usually works anyway; where two cases share
+one, as Brown I and Brown II both do at "No. 1", the error names each address so you
+can pick.
+
+**Cite the `Links` line from `get_case`, don't build a URL.** oyez.org serves the
+same single-page shell for every path under `/cases/`, so an address you compose
+yourself does not 404 when it is wrong — it answers `200` and renders an empty page.
+
 ### Parameters
 
 **`search_cases`**
