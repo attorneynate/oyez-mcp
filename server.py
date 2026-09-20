@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import html
 import re
+import time
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -41,7 +42,12 @@ SEARCH_FIELDS = [
     "field_question:value",
     "field_conclusion:value",
 ]
-USER_AGENT = "oyez-mcp/1.0 (Claude Code MCP server)"
+USER_AGENT = "oyez-mcp/1.1 (Claude Code MCP server)"
+
+# Oyez's search index runs about a Term behind its case data (in September
+# 2026 it had no 2025 Term case), so search_cases also scans the most recent
+# Terms' case lists. Those lists are the one thing kept in memory, briefly.
+TERM_CACHE_TTL = 600.0  # seconds
 
 app = MCPServer("oyez")
 
@@ -99,6 +105,86 @@ async def _search(query: str, size: int) -> list[dict]:
     except ValueError as e:
         raise OyezError(f"Oyez search returned malformed JSON: {e}") from e
     return [h.get("_source", {}) for h in data.get("hits", {}).get("hits", [])]
+
+
+_TERM_CACHE: dict[str, tuple[float, list[dict]]] = {}
+
+
+async def _term_cases(term: str) -> list[dict]:
+    """All case summaries for a Term, cached for TERM_CACHE_TTL seconds."""
+    now = time.monotonic()
+    hit = _TERM_CACHE.get(term)
+    if hit and now - hit[0] < TERM_CACHE_TTL:
+        return hit[1]
+    data = await _get(f"{API}/cases", params={"filter": f"term:{term}", "per_page": 0})
+    if isinstance(data, dict):
+        data = [data]
+    cases = [c for c in (data or []) if isinstance(c, dict)]
+    _TERM_CACHE[term] = (now, cases)
+    return cases
+
+
+def _recent_terms(today: Optional[datetime] = None) -> list[str]:
+    """The Terms the search index tends to lag behind: the Term in progress, the
+    one before it, and the coming Term whose grants Oyez already lists. A Term
+    is named for the year it begins in October."""
+    d = today or datetime.now(timezone.utc)
+    ty = d.year if d.month >= 10 else d.year - 1
+    return [str(ty + 1), str(ty), str(ty - 1)]
+
+
+_WORD_RE = re.compile(r"[a-z0-9]+")
+_DOCKET_RE = re.compile(r"^\d{1,3}-\d{1,5}$|^\d{2}[ao]\d{1,5}$")  # 25-332, 22a123, 22o145
+_NAME_STOP = frozenset("v vs versus the of in re et al inc co corp llc ltd and a an".split())
+
+
+def _norm_docket(value: Any) -> str:
+    s = str(value or "").strip().lower()
+    s = re.sub(r"^(no\.?|docket)\s*", "", s)
+    return re.sub(r"[\u2010\u2011\u2012\u2013\u2014]", "-", s)
+
+
+def _name_tokens(value: Any) -> list[str]:
+    return [w for w in _WORD_RE.findall(str(value or "").lower()) if w not in _NAME_STOP]
+
+
+def _case_matches(case: dict, query: str) -> bool:
+    """True when `query` is the case's docket number, or every word of it
+    (ignoring "v.", "Inc.", and the like) appears in the case name."""
+    qd = _norm_docket(query)
+    if _DOCKET_RE.match(qd):
+        return _norm_docket(case.get("docket_number")) == qd
+    wanted = _name_tokens(query)
+    if not wanted:
+        return False
+    have = set(_name_tokens(case.get("name")))
+    return all(w in have for w in wanted)
+
+
+async def _scan_recent_terms(query: str) -> tuple[list[dict], list[str]]:
+    """Name-and-docket matches for `query` in the most recent Terms' case lists.
+
+    One request per Term, in turn, and never a raise: a Term that cannot be
+    fetched is skipped. The second value names the Terms that were scanned
+    and had cases.
+    """
+    matches: list[dict] = []
+    scanned: list[str] = []
+    for term in _recent_terms():
+        try:
+            cases = await _term_cases(term)
+        except OyezError:
+            continue
+        if not cases:
+            continue
+        scanned.append(term)
+        matches.extend(c for c in cases if _case_matches(c, query))
+    return matches, scanned
+
+
+def _result_row(name: Any, term: Any, docket: Any, year: Any) -> str:
+    suffix = f", {year}" if year else ""
+    return f"- **{name or '(untitled)'}** \u2014 Term {term or '?'}, No. {docket or '?'}{suffix}"
 
 
 async def _fetch_case(term: str, docket: str) -> dict:
@@ -222,6 +308,10 @@ async def search_cases(query: str, limit: int = 10, include_people: bool = False
     finds cases with that word in the title. Every result lists the Term and
     docket number you pass to get_case, get_oral_argument, or list_term_cases.
 
+    Oyez's search index runs about a Term behind its case data, so this tool
+    also scans the three most recent Terms' case lists by name and docket
+    number and lists those matches first.
+
     Args:
         query: Case name, party name, or docket number (e.g. "Obergefell",
             "new york times v sullivan", "14-556").
@@ -229,33 +319,68 @@ async def search_cases(query: str, limit: int = 10, include_people: bool = False
         include_people: Also include matching Justices/advocates (default False).
     """
     limit = max(1, min(int(limit), 50))
+    query = (query or "").strip()
+    if not query:
+        return "Give search_cases a case name, a party name, or a docket number."
+
+    index_err: Optional[OyezError] = None
     try:
         sources = await _search(query, size=limit * 3 + 5)
     except OyezError as e:
-        return f"⚠️ {e}"
+        sources, index_err = [], e
+    recent, scanned = await _scan_recent_terms(query)
 
+    seen: set[tuple[str, str]] = set()
     rows: list[str] = []
+    for c in recent:
+        key = (str(c.get("term")), str(c.get("docket_number")))
+        if key in seen:
+            continue
+        seen.add(key)
+        year = (c.get("citation") or {}).get("year")
+        rows.append(_result_row(c.get("name"), c.get("term"), c.get("docket_number"), year))
+        if len(rows) >= limit:
+            break
     for s in sources:
+        if len(rows) >= limit:
+            break
         typ = s.get("type")
         if typ == "case":
             term = s.get("field_court_term") or "?"
             docket = s.get("field_docket_number") or "?"
+            key = (str(term), str(docket))
+            if key in seen:
+                continue
+            seen.add(key)
             name = _nice_title(s.get("title", "")) or "(untitled)"
-            year = s.get("field_citation:field_year")
-            suffix = f", {year}" if year else ""
-            rows.append(f"- **{name}** — Term {term}, No. {docket}{suffix}")
+            rows.append(_result_row(name, term, docket, s.get("field_citation:field_year")))
         elif include_people and typ == "person":
-            rows.append(f"- _(person)_ {s.get('title', '?')} — {s.get('url', '')}")
-        if len(rows) >= limit:
-            break
+            rows.append(f"- _(person)_ {s.get('title', '?')} \u2014 {s.get('url', '')}")
 
+    scanned_note = ""
+    if scanned:
+        scanned_note = (
+            f"Terms {', '.join(scanned)} were also scanned by name and docket, "
+            "since Oyez's search index lags them."
+        )
     if not rows:
+        if index_err is not None:
+            return f"\u26a0\ufe0f {index_err}" + (f"\n{scanned_note} No match there either." if scanned_note else "")
         return (
             f"No cases found for {query!r}. Oyez search matches case names, "
-            "parties, and docket numbers - try a party name or the docket number."
+            "parties, and docket numbers - try a party name or the docket number, "
+            "or list_term_cases for a Term." + (f"\n{scanned_note}" if scanned_note else "")
         )
-    header = f"Found {len(rows)} result(s) for {query!r}:\n"
+    header = ""
+    if index_err is not None:
+        header = (
+            f"\u26a0\ufe0f Oyez's search index was unavailable ({index_err}); "
+            "these come from the recent Term lists only.\n"
+        )
+    header += f"Found {len(rows)} result(s) for {query!r}:\n"
     footer = "\n\nUse get_case(term, docket) for full details."
+    if scanned_note:
+        footer += "\n" + scanned_note
     return header + "\n".join(rows) + footer
 
 
@@ -417,11 +542,9 @@ async def list_term_cases(term: str, limit: int = 60) -> str:
     """
     limit = max(1, min(int(limit), 400))
     try:
-        data = await _get(f"{API}/cases", params={"filter": f"term:{term}", "per_page": 0})
+        data = await _term_cases(str(term).strip())
     except OyezError as e:
-        return f"⚠️ {e}"
-    if isinstance(data, dict):
-        data = [data]
+        return f"\u26a0\ufe0f {e}"
     if not data:
         return f"No cases found for Term {term}."
 
@@ -639,7 +762,14 @@ async def _render_media(
                     continue
                 prefix = f"[{_hms(turn.get('start'))}] " if include_timestamps else ""
                 line = f"{prefix}{nm}: {text}"
-                if used + len(line) > max_chars:
+                remaining = max_chars - used
+                if len(line) > remaining:
+                    # Never drop a turn whole. Under a low cap, one long turn
+                    # (a dissent read from the bench) used to come back as no
+                    # text at all; keep the part that fits instead.
+                    if matched == 0 or remaining >= 200:
+                        body.append(_clip(line, remaining))
+                        matched += 1
                     truncated = True
                     break
                 body.append(line)
@@ -653,8 +783,8 @@ async def _render_media(
         body.append(f"\n_(no transcript text found.{hint})_")
     if truncated:
         body.append(
-            f"\n… truncated at ~{max_chars} characters. Narrow it with "
-            "speaker=\"<name>\", pick a part=, or raise max_chars."
+            f"\n\u2026 truncated at ~{max_chars} characters; the last turn shown may be "
+            "cut short. Narrow it with speaker=\"<name>\", pick a part=, or raise max_chars."
         )
 
     return "\n".join(head) + "\n" + "\n".join(body)
