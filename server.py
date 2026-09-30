@@ -20,7 +20,7 @@ from __future__ import annotations
 import html
 import re
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 import httpx
@@ -296,10 +296,22 @@ def _clip(text: str, limit: int) -> str:
     return text[:limit].rsplit(" ", 1)[0] + " …"
 
 
-def _epoch_to_date(epoch: Any) -> str:
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def _epoch(value: Any) -> Optional[int]:
     try:
-        dt = datetime.fromtimestamp(int(epoch), tz=timezone.utc)
-    except (TypeError, ValueError, OSError):
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _epoch_to_date(epoch: Any) -> str:
+    # Not datetime.fromtimestamp: on Windows it raises for any date before
+    # 1970, which silently dropped every date from Brown and its era.
+    try:
+        dt = _EPOCH + timedelta(seconds=int(epoch))
+    except (TypeError, ValueError, OverflowError):
         return ""
     # %-d / %e are not portable to Windows, so build the day by hand.
     return f"{dt.strftime('%B')} {dt.day}, {dt.year}"
@@ -315,11 +327,34 @@ def _hms(seconds: Any) -> str:
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
 
-def _is_justice(speaker: dict) -> bool:
+def _is_justice(speaker: dict, when: list[int]) -> bool:
+    """True when the speaker was a Justice on one of the dates in `when`.
+
+    Oyez gives a person every role they ever held, so someone who argued a
+    case before joining the Court carries the Justice role there too:
+    Solicitor General Kagan in the Citizens United reargument, Roberts in his
+    years at the bar, Thurgood Marshall in Brown. Count the role only if it
+    covers one of the case's dates. With no dates, any Justice role counts.
+    """
     for role in speaker.get("roles") or []:
-        if "justice" in str(role.get("type", "")).lower():
+        if "justice" not in str(role.get("type", "")).lower():
+            continue
+        if not when:
+            return True
+        start, end = _epoch(role.get("date_start")), _epoch(role.get("date_end"))
+        # date_end is 0 for a sitting Justice.
+        if any((start is None or start <= t) and (not end or t <= end) for t in when):
             return True
     return False
+
+
+def _event_dates(case: dict, events: tuple[str, ...]) -> list[int]:
+    """Every date on the case timeline for the named events ("Argued", ...)."""
+    out: list[int] = []
+    for ev in case.get("timeline") or []:
+        if ev and ev.get("event") in events:
+            out.extend(t for t in map(_epoch, ev.get("dates") or []) if t is not None)
+    return out
 
 
 def _nice_title(raw: str) -> str:
@@ -349,6 +384,18 @@ def _citation(cit: Optional[dict]) -> str:
     if year:
         base = (f"{base} ({year})").strip()
     return base
+
+
+# Oyez's opinion_type values, as what the Justice wrote. The author of the
+# majority opinion reads "majority" in both vote and opinion_type.
+_OPINION_WROTE = {
+    "majority": "wrote the majority opinion",
+    "plurality": "wrote the plurality opinion",
+    "concurrence": "wrote a concurrence",
+    "special concurrence": "wrote a special concurrence",
+    "dissent": "wrote a dissent",
+    "coauthored dissent": "co-wrote a dissent",
+}
 
 
 def _first(value: Any) -> Optional[dict]:
@@ -552,10 +599,16 @@ def _format_case(c: dict, term: str, docket: str) -> str:
             vlines = []
             for v in votes:
                 member = (v.get("member") or {}).get("name") or "?"
-                vote = v.get("vote") or "?"
+                bits = [f"{member}: {v.get('vote') or '?'}"]
                 op = v.get("opinion_type")
-                tag = f" [{op}]" if op and op not in ("none", vote) else ""
-                vlines.append(f"  - {member}: {vote}{tag}")
+                if op and op != "none":
+                    bits.append(_OPINION_WROTE.get(op, f"wrote an opinion ({op})"))
+                # Whose opinions this Justice joined. Semicolons, because names
+                # like "John G. Roberts, Jr." carry their own commas.
+                joined = [j.get("name") for j in v.get("joining") or [] if j and j.get("name")]
+                if joined:
+                    bits.append("joined " + "; ".join(joined))
+                vlines.append("  - " + " · ".join(bits))
             parts.append("Votes:\n" + "\n".join(vlines))
         out.append("\n".join(parts))
 
@@ -661,6 +714,8 @@ async def get_oral_argument(
         speaker: Case-insensitive substring of a speaker's name; include only
             their turns (e.g. "Scalia", "Verrilli", "Roberts").
         speaker_type: "justice" or "advocate" to include only that group.
+            Someone who argued the case before joining the Court (Kagan as
+            Solicitor General, say) counts as an advocate.
         part: For arguments split into sessions, the 1-based session index;
             default is all sessions.
         include_timestamps: Prefix each turn with its start time (H:MM:SS).
@@ -672,7 +727,7 @@ async def get_oral_argument(
     except OyezError as e:
         return f"⚠️ {e}\nTip: use search_cases to find the correct Term and docket."
     return await _render_media(
-        c, c.get("oral_argument_audio") or [], "oral argument",
+        c, c.get("oral_argument_audio") or [], "oral argument", ("Argued", "Reargued"),
         speaker, speaker_type, part, include_timestamps, max_chars,
     )
 
@@ -704,7 +759,7 @@ async def get_opinion_announcement(
     except OyezError as e:
         return f"⚠️ {e}\nTip: use search_cases to find the correct Term and docket."
     return await _render_media(
-        c, c.get("opinion_announcement") or [], "opinion announcement",
+        c, c.get("opinion_announcement") or [], "opinion announcement", ("Decided",),
         speaker, None, part, include_timestamps, max_chars,
     )
 
@@ -713,6 +768,7 @@ async def _render_media(
     case: dict,
     media_list: list,
     label: str,
+    events: tuple[str, ...],
     speaker: Optional[str],
     speaker_type: Optional[str],
     part: Optional[int],
@@ -741,6 +797,9 @@ async def _render_media(
         return "speaker_type must be 'justice' or 'advocate'."
     sp = (speaker or "").strip().lower() or None
     max_chars = max(1000, min(int(max_chars), 200000))
+    # The media carry no date of their own, so a speaker is judged a Justice
+    # or not against the case's argument (or decision) dates.
+    when = _event_dates(case, events)
 
     # Fetch every selected session up front (so the speaker roster is complete)
     fetched = []
@@ -771,7 +830,7 @@ async def _render_media(
             for turn in sec.get("turns") or []:
                 spk = turn.get("speaker") or {}
                 nm = spk.get("name") or "Unknown"
-                entry = roster.setdefault(nm, [0, _is_justice(spk)])
+                entry = roster.setdefault(nm, [0, _is_justice(spk, when)])
                 entry[0] += 1
 
     # Header
@@ -825,9 +884,9 @@ async def _render_media(
                 nm = spk.get("name") or "Unknown"
                 if sp and sp not in nm.lower():
                     continue
-                if st == "justice" and not _is_justice(spk):
+                if st == "justice" and not _is_justice(spk, when):
                     continue
-                if st == "advocate" and _is_justice(spk):
+                if st == "advocate" and _is_justice(spk, when):
                     continue
                 text = " ".join(
                     _text(tb.get("text"))

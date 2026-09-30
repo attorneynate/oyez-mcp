@@ -59,7 +59,9 @@ yourself does not 404 when it is wrong — it answers `200` and renders an empty
 - `term`, `docket` — as above
 - `speaker` — case-insensitive substring of a name; returns only that person's turns
   (`"Scalia"`, `"Verrilli"`)
-- `speaker_type` — `"justice"` or `"advocate"`
+- `speaker_type` — `"justice"` or `"advocate"`. Someone who argued the case before
+  joining the Court — Kagan as Solicitor General in *Citizens United* — counts as an
+  advocate there.
 - `part` — 1-based session index for arguments split across sessions (default: all)
 - `include_timestamps` — prefix each turn with `H:MM:SS`
 - `max_chars` — soft length cap, 1000–200000 (default 18000)

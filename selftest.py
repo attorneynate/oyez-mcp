@@ -84,6 +84,12 @@ async def main():
                 sys.exit("FAIL  get_case did not link Brown I by its own path:\n" + out)
             print("OK  a bucketed-Term case links to its own path, not its docket number")
 
+            # datetime.fromtimestamp raises on Windows for any date before 1970,
+            # and that used to drop Brown's whole timeline without a word.
+            if "Decided: May 17, 1954" not in out:
+                sys.exit("FAIL  get_case(Brown I) lost its pre-1970 dates:\n" + out)
+            print("OK  pre-1970 dates survive (Brown I, decided May 17, 1954)")
+
             # Bakke reports "Term 1977" and lives at 1979/76-811, so the pair
             # search_cases prints does not resolve on its own.
             out = text_of(await session.call_tool(
@@ -99,6 +105,26 @@ async def main():
             if "347us483" not in out or "349us294" not in out:
                 sys.exit("FAIL  an ambiguous docket did not name both cases:\n" + out)
             print("OK  an ambiguous docket names both addresses instead of guessing")
+
+            # The majority author reads "majority" as both vote and opinion type,
+            # which once hid the fact that Kennedy wrote Obergefell.
+            out = text_of(await session.call_tool("get_case", {"term": "2014", "docket": "14-556"}))
+            if not re.search(r"Anthony M\. Kennedy: majority \S+ wrote the majority opinion", out):
+                sys.exit("FAIL  get_case(Obergefell) did not name the majority author:\n" + out)
+            if not re.search(r"Ruth Bader Ginsburg: majority \S+ joined Anthony M\. Kennedy", out):
+                sys.exit("FAIL  get_case(Obergefell) did not say who joined whom:\n" + out)
+            print("OK  the majority author and the joins are named (Obergefell)")
+
+            # Oyez gives Kagan her Justice role on a transcript from the year
+            # before she joined the Court, where she argued as Solicitor General.
+            out = text_of(await session.call_tool(
+                "get_oral_argument",
+                {"term": "2008", "docket": "08-205", "part": 2,
+                 "speaker": "Kagan", "speaker_type": "advocate", "max_chars": 1000}))
+            others = re.search(r"^Advocates/others: (.*)$", out, re.M)
+            if not others or "Elena Kagan" not in others.group(1) or "Elena Kagan:" not in out:
+                sys.exit("FAIL  Kagan as Solicitor General was not treated as an advocate:\n" + out)
+            print("OK  an advocate who later joined the Court counts as an advocate (Kagan, Citizens United)")
 
             # A turn longer than max_chars used to be dropped whole, so a low cap on
             # one long announcement returned no text at all.
