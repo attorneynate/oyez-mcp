@@ -44,9 +44,10 @@ SEARCH_FIELDS = [
 ]
 USER_AGENT = "oyez-mcp/1.1 (Claude Code MCP server)"
 
-# Oyez's search index runs about a Term behind its case data (in September
-# 2026 it had no 2025 Term case), so search_cases also scans the most recent
-# Terms' case lists. Those lists are the one thing kept in memory, briefly.
+# Oyez's search index runs well behind its case data (in September 2026 it had
+# no 2025 Term case and only 21 of the 62 in the 2024 Term), so search_cases
+# also scans the most recent Terms' case lists. Those lists are the one thing
+# kept in memory, briefly.
 TERM_CACHE_TTL = 600.0  # seconds
 
 app = MCPServer("oyez")
@@ -125,12 +126,15 @@ async def _term_cases(term: str) -> list[dict]:
 
 
 def _recent_terms(today: Optional[datetime] = None) -> list[str]:
-    """The Terms the search index tends to lag behind: the Term in progress, the
-    one before it, and the coming Term whose grants Oyez already lists. A Term
-    is named for the year it begins in October."""
+    """The Terms the search index tends to lag behind: the coming Term whose
+    grants Oyez already lists, the Term in progress, and the two before it. A
+    Term is named for the year it begins in October.
+
+    Two back, not one: the index fills in slowly, and a three-Term window
+    rolling forward each October would drop a Term it still mostly lacks."""
     d = today or datetime.now(timezone.utc)
     ty = d.year if d.month >= 10 else d.year - 1
-    return [str(ty + 1), str(ty), str(ty - 1)]
+    return [str(ty + 1), str(ty), str(ty - 1), str(ty - 2)]
 
 
 _WORD_RE = re.compile(r"[a-z0-9]+")
@@ -367,9 +371,9 @@ async def search_cases(query: str, limit: int = 10, include_people: bool = False
     finds cases with that word in the title. Every result lists the Term and
     docket number you pass to get_case, get_oral_argument, or list_term_cases.
 
-    Oyez's search index runs about a Term behind its case data, so this tool
-    also scans the three most recent Terms' case lists by name and docket
-    number and lists those matches first.
+    Oyez's search index runs well behind its case data, so this tool also
+    scans the four most recent Terms' case lists by name and docket number and
+    lists those matches first.
 
     Args:
         query: Case name, party name, or docket number (e.g. "Obergefell",

@@ -74,9 +74,10 @@ A note on search: it matches case names, parties, and docket numbers. It is **no
 free-text topical search. `"brown v board of education"` and `"14-556"` work well; a
 bare topic like `"abortion"` only finds cases with that word in the title.
 
-Oyez's own search index runs about a Term behind its case data (in September 2026 it
-had no 2025 Term case at all), so `search_cases` also scans the three most recent
-Terms' case lists by name and docket number and lists those matches first. A case
+Oyez's own search index runs well behind its case data (in September 2026 it had no
+2025 Term case at all, and only 21 of the 62 in the 2024 Term), so `search_cases` also
+scans the four most recent Terms' case lists — the coming Term, the current one, and
+the two before it — by name and docket number and lists those matches first. A case
 decided this Term is found by its name or its docket number like any other.
 
 Transcripts are long. A full argument can run tens of thousands of characters, so
@@ -220,7 +221,7 @@ rather than passing raw API responses through: vote breakdowns become a table,
 transcripts become `Speaker: text` turns.
 
 There is no database, and every tool call is a live HTTP request, with one exception:
-the three most recent Terms' case lists, which `search_cases` scans, are kept in memory
+the four most recent Terms' case lists, which `search_cases` scans, are kept in memory
 for ten minutes. `max_chars` exists because full transcripts are big enough to matter
 to a context window.
 

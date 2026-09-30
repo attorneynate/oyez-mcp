@@ -59,6 +59,21 @@ async def main():
                 sys.exit(f"FAIL  search_cases({docket!r}) did not return {name!r}:\n{out}")
             print(f"OK  search_cases finds a Term {term} case by docket ({name}, No. {docket})")
 
+            # The index lags more than a Term: in September 2026 it held 21 of the
+            # 62 cases from the Term two back. So that Term must stay in the scan
+            # after the window rolls forward in October.
+            back2 = str(term_year - 2)
+            r = await session.call_tool("list_term_cases", {"term": back2, "limit": 1})
+            m = re.search(r"^- (.+?) — No\. (\S+)$", text_of(r), re.M)
+            if not m:
+                sys.exit(f"FAIL  no case could be read from the Term {back2} list")
+            name, docket = m.group(1), m.group(2)
+            out = text_of(await session.call_tool("search_cases", {"query": docket, "limit": 3}))
+            scanned = re.search(r"^Terms (.+) were also scanned", out, re.M)
+            if name not in out or not scanned or back2 not in scanned.group(1).split(", "):
+                sys.exit(f"FAIL  search_cases({docket!r}) did not scan Term {back2}:\n{out}")
+            print(f"OK  the Term two back ({back2}) is still scanned ({name}, No. {docket})")
+
             # oyez.org answers 200 with the same shell for every /cases/ path, so a
             # composed address renders an empty page instead of failing. The link
             # has to come from the API's href: Brown I is 1940-1955/347us483, and
