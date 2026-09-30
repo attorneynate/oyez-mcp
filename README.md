@@ -16,9 +16,9 @@ Data comes from the public Oyez API (`api.oyez.org`) and Oyez's search backend
 | Tool | What it does |
 |------|--------------|
 | `search_cases` | Find cases by **name, party, or docket number** (e.g. `"citizens united"`, `"14-556"`). Returns each case's Term + docket. |
-| `get_case` | Full case record: parties, citation, key dates, facts, question presented, holding/conclusion, the decision with its **vote breakdown and opinion authors**, advocates, and the available audio. |
-| `list_term_cases` | Every case from a given Term (e.g. `"2014"`). |
-| `get_oral_argument` | Oral-argument transcript, optionally filtered by speaker. Handles multi-session arguments and timestamps. |
+| `get_case` | Full case record: parties, citation, key dates, facts, question presented, holding/conclusion, the decision with its **vote breakdown and opinion authors**, each **written opinion** with its Justia link, advocates, and the available audio. |
+| `list_term_cases` | Every case from a given Term (e.g. `"2014"`), optionally with each case's stage, date, and one-line holding. |
+| `get_oral_argument` | Oral-argument transcript, filterable by speaker, by text (`find`), and from a point in time (`start`). Handles multi-session arguments and timestamps. |
 | `get_opinion_announcement` | Opinion-announcement / dissent-from-the-bench transcript, same filters. |
 
 Every tool is keyed on the pair **Term + docket** (`"2014"`, `"14-556"`) — that is
@@ -54,6 +54,10 @@ yourself does not 404 when it is wrong — it answers `200` and renders an empty
 - `term` — the year the Term *began*, so `"2014"` means OT2014 (October 2014 through
   June/July 2015)
 - `limit` — 1–400 (default 60)
+- `include_summary` — also give each case's stage and date (decided, argued, or
+  granted) and its one-line holding, or its question presented before a decision
+  (default false). About 300 characters more per case, and the way to browse a Term
+  by topic.
 
 Where cases in a Term share a docket number, as Brown I and Brown II share "No. 1",
 the line for each one gives the `get_case` call that reaches it.
@@ -66,28 +70,41 @@ the line for each one gives the `get_case` call that reaches it.
 - `speaker_type` — `"justice"` or `"advocate"`. Someone who argued the case before
   joining the Court — Kagan as Solicitor General in *Citizens United* — counts as an
   advocate there.
+- `find` — case-insensitive text; returns only the turns that contain it
+  (`"personhood"`). Combine with `speaker_type` for what one side said about it.
+- `start` — resume at this point in the recording, as `"H:MM:SS"`, `"M:SS"`, or
+  seconds. Turns before it in the first selected session are skipped. A truncated
+  transcript ends by naming the exact `part` and `start` to continue from.
 - `part` — 1-based session index for arguments split across sessions (default: all)
 - `include_timestamps` — prefix each turn with `H:MM:SS`
 - `max_chars` — soft length cap, 1000–200000 (default 18000)
 
 **`get_opinion_announcement`**
 
-- `term`, `docket`, `speaker`, `part`, `include_timestamps`, `max_chars` — as above.
+- `term`, `docket`, `speaker`, `find`, `start`, `part`, `include_timestamps`,
+  `max_chars` — as above.
   No `speaker_type` here; `part` is how you pick between, say, the majority
   announcement and a dissent read from the bench.
 
-A note on search: it matches case names, parties, and docket numbers. It is **not** a
-free-text topical search. `"brown v board of education"` and `"14-556"` work well; a
-bare topic like `"abortion"` only finds cases with that word in the title.
+A note on search: Oyez's index matches case names, parties, and docket numbers. It is
+**not** a free-text topical search. `"brown v board of education"` and `"14-556"` work
+well; a bare topic like `"abortion"` only finds cases with that word in the title. The
+exception is the four recent Terms the server scans itself, where a query is also
+matched against each case's one-line holding and question presented, so
+`"universal injunction"` does find *Trump v. CASA*; such a result shows the line it
+matched. For a topic in an older Term, list the Term with `include_summary`.
 
 Oyez's own search index runs well behind its case data (in September 2026 it had no
 2025 Term case at all, and only 21 of the 62 in the 2024 Term), so `search_cases` also
 scans the four most recent Terms' case lists — the coming Term, the current one, and
-the two before it — by name and docket number and lists those matches first. A case
+the two before it — by name, docket number, holding, and question presented, and lists
+those matches first. A case
 decided this Term is found by its name or its docket number like any other.
 
-Transcripts are long. A full argument can run tens of thousands of characters, so
-filter with `speaker` or `speaker_type` when you only need part of it, and raise
+Transcripts are long. A full argument can run a hundred thousand characters, so
+filter with `speaker`, `speaker_type`, or `find` when you only need part of it. To
+read one straight through, keep the default cap and follow the note at the end of a
+truncated transcript: it names the `part` and `start` to continue from. Raise
 `max_chars` deliberately rather than by habit.
 
 ## Requirements
@@ -201,6 +218,8 @@ use full absolute paths.
 - "Get the opinion announcement for Obergefell and quote the part Roberts read from the bench."
 - "List the 2014 Term cases, then give me the vote breakdown for Glossip v. Gross."
 - "In the Citizens United argument, what did the advocates say about corporate personhood? Advocates only."
+- "List the 2024 Term with summaries and pick out the First Amendment cases."
+- "Read me the Obergefell argument from the start, a chunk at a time."
 
 ## Troubleshooting
 

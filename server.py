@@ -9,8 +9,9 @@ Tools
   search_cases              find cases by name, party, or docket number
   get_case                  full metadata: parties, citation, dates, facts,
                             question presented, holding, decision + votes
-  list_term_cases           every case from a given Supreme Court Term
-  get_oral_argument         oral-argument transcript, filterable by speaker
+  list_term_cases           every case from a Term, optionally with its holding
+  get_oral_argument         oral-argument transcript, filterable by speaker,
+                            by text, and from a point in time
   get_opinion_announcement  opinion-announcement / dissent-from-the-bench audio
 
 Run as a stdio MCP server:  python server.py
@@ -23,6 +24,7 @@ import time
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
+from urllib.parse import quote
 
 import httpx
 from mcp.server.mcpserver import MCPServer
@@ -44,7 +46,7 @@ SEARCH_FIELDS = [
     "field_question:value",
     "field_conclusion:value",
 ]
-VERSION = "1.2"
+VERSION = "1.3"
 USER_AGENT = f"oyez-mcp/{VERSION} (Claude Code MCP server)"
 
 # Oyez's search index runs well behind its case data (in September 2026 it had
@@ -53,21 +55,29 @@ USER_AGENT = f"oyez-mcp/{VERSION} (Claude Code MCP server)"
 # thing kept in memory, briefly.
 TERM_CACHE_TTL = 600.0  # seconds
 
+# Facts, question, and conclusion are printed whole up to this. Oyez's newer
+# conclusions summarize every separate opinion and run past 3000 characters;
+# a cap of 2200 cut that tail, which is the part that names the concurrences
+# and dissents.
+SUMMARY_CHARS = 8000
+
 INSTRUCTIONS = """\
 Oyez data on U.S. Supreme Court cases: case summaries, decisions and votes,
 and oral-argument and opinion-announcement transcripts.
 
 Every case tool takes a Term plus a docket number. Get that pair from
-search_cases (case name, party, or docket number; not a topic search) or
-list_term_cases, then pass it to get_case, get_oral_argument, or
+search_cases (case name, party, or docket number; a topic finds only cases
+from the recent Terms) or list_term_cases (include_summary=True gives each
+case's holding), then pass it to get_case, get_oral_argument, or
 get_opinion_announcement.
 
 To cite or open a case on oyez.org, use the address on get_case's Links line.
 Do not compose one: a wrong oyez.org/cases/ path still loads, as an empty page.
 
-Transcripts are long. Filter with speaker or speaker_type before raising
-max_chars. Oyez's summaries are secondary sources; for what the Court held,
-go to the opinion."""
+Transcripts are long. Filter with speaker, speaker_type, or find before
+raising max_chars; a truncated transcript ends by naming the part and start
+to continue from. Oyez's summaries are secondary sources; for what the Court
+held, go to the opinion (get_case links each written opinion)."""
 
 # WARNING, not the SDK's default INFO: at INFO, httpx writes a line to stderr
 # for every request Oyez answers.
@@ -183,6 +193,13 @@ _DOCKET_RE = re.compile(r"^\d{1,3}-\d{1,5}$|^\d{2}a\d{1,5}$|^\d{1,4}-orig$")  # 
 # site, "22O156".
 _ORIG_RE = re.compile(r"^(?:(\d{1,4})\s*[-,]?\s*orig(?:inal)?\.?|\d{2}o(\d{1,4}))$")
 _NAME_STOP = frozenset("v vs versus the of in re et al inc co corp llc ltd and a an".split())
+# Words that carry nothing when matching a query against a case's one-line
+# holding ("A case in which the Court held that ...") or its question presented.
+_SUMMARY_STOP = _NAME_STOP | frozenset(
+    "case which court held ruled that whether does do did not is are was were be been "
+    "by for to on under with from it its as at or may must can if this these those "
+    "their they them he she his her has have had".split()
+)
 
 
 def _norm_docket(value: Any) -> str:
@@ -197,27 +214,41 @@ def _name_tokens(value: Any) -> list[str]:
     return [w for w in _WORD_RE.findall(str(value or "").lower()) if w not in _NAME_STOP]
 
 
-def _case_matches(case: dict, query: str) -> bool:
-    """True when `query` is the case's docket number, or every word of it
-    (ignoring "v.", "Inc.", and the like) appears in the case name."""
+def _case_matches(case: dict, query: str) -> int:
+    """How well `query` fits a case from a Term list.
+
+    2 when it is the case's docket number, or every word of it (ignoring
+    "v.", "Inc.", and the like) appears in the case name. 1 when every word
+    (ignoring those and the boilerplate of a holding) appears in the case's
+    name, one-line holding, or question presented together, so a topic finds
+    a case the index lacks. 0 otherwise.
+    """
     qd = _norm_docket(query)
     if _DOCKET_RE.match(qd):
-        return _norm_docket(case.get("docket_number")) == qd
+        return 2 if _norm_docket(case.get("docket_number")) == qd else 0
     wanted = _name_tokens(query)
     if not wanted:
-        return False
+        return 0
     have = set(_name_tokens(case.get("name")))
-    return all(w in have for w in wanted)
+    if all(w in have for w in wanted):
+        return 2
+    wanted = [w for w in wanted if w not in _SUMMARY_STOP]
+    if not wanted:
+        return 0
+    have |= set(_name_tokens(_text(case.get("description")) + " " + _text(case.get("question"))))
+    return 1 if all(w in have for w in wanted) else 0
 
 
-async def _scan_recent_terms(query: str) -> tuple[list[dict], list[str]]:
-    """Name-and-docket matches for `query` in the most recent Terms' case lists.
+async def _scan_recent_terms(query: str) -> tuple[list[tuple[int, dict]], list[str]]:
+    """Matches for `query` in the most recent Terms' case lists, as
+    (tier, case) pairs: docket and name matches (tier 2) ahead of matches on
+    the one-line holding or the question presented (tier 1).
 
     One request per Term, in turn, and never a raise: a Term that cannot be
     fetched is skipped. The second value names the Terms that were scanned
     and had cases.
     """
-    matches: list[dict] = []
+    matches: list[tuple[int, dict]] = []
     scanned: list[str] = []
     for term in _recent_terms():
         try:
@@ -227,11 +258,18 @@ async def _scan_recent_terms(query: str) -> tuple[list[dict], list[str]]:
         if not cases:
             continue
         scanned.append(term)
-        matches.extend(c for c in cases if _case_matches(c, query))
+        for c in cases:
+            tier = _case_matches(c, query)
+            if tier:
+                matches.append((tier, c))
+    # Stable, so within a tier the Terms stay newest first and in list order.
+    matches.sort(key=lambda m: -m[0])
     return matches, scanned
 
 
 def _result_row(name: Any, term: Any, docket: Any, year: Any) -> str:
+    # Some Oyez docket numbers carry a trailing space ("23-1197 ").
+    docket = str(docket).strip() if docket else ""
     suffix = f", {year}" if year else ""
     return f"- **{name or '(untitled)'}** \u2014 Term {term or '?'}, No. {docket or '?'}{suffix}"
 
@@ -259,7 +297,7 @@ def _site_url(c: dict, term: str, docket: str) -> str:
     oyez.org answers 200 with the same single-page shell for every path under
     /cases/. A wrong address here does not 404; it renders an empty page.
     """
-    path = _case_path(c) or f"{c.get('term', term)}/{c.get('docket_number', docket)}"
+    path = _case_path(c) or f"{c.get('term') or term}/{str(c.get('docket_number') or docket).strip()}"
     return f"https://www.oyez.org/cases/{path}"
 
 
@@ -277,7 +315,10 @@ async def _fetch_case(term: str, docket: str) -> dict:
     Where two cases share a docket -- Brown I and Brown II are both "No. 1" --
     there is no right guess, so name both and let the caller choose.
     """
-    data = await _get(f"{API}/cases/{term}/{docket}")
+    term, docket = str(term or "").strip(), str(docket or "").strip()
+    # Quoted, so a docket is only ever one path segment. Unquoted, a docket
+    # of "../../people/x" walked up to a person record and rendered it as a case.
+    data = await _get(f"{API}/cases/{quote(term, safe='')}/{quote(docket, safe='')}")
     if isinstance(data, dict) and (data.get("name") or data.get("ID")):
         return data
 
@@ -362,14 +403,36 @@ def _epoch_to_date(epoch: Any) -> str:
     return f"{dt.strftime('%B')} {dt.day}, {dt.year}"
 
 
-def _hms(seconds: Any) -> str:
+def _seconds(value: Any) -> Optional[float]:
     try:
-        total = int(float(seconds))
+        return float(value)
     except (TypeError, ValueError):
+        return None
+
+
+def _hms(seconds: Any) -> str:
+    total = _seconds(seconds)
+    if total is None:
         return ""
-    h, rem = divmod(total, 3600)
+    h, rem = divmod(int(total), 3600)
     m, s = divmod(rem, 60)
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+def _parse_time(value: Any) -> Optional[float]:
+    """Seconds from "1:23:45", "23:45", "45", or a number; None when empty."""
+    s = str(value if value is not None else "").strip()
+    if not s:
+        return None
+    total = 0.0
+    for piece in s.split(":"):
+        try:
+            total = total * 60 + float(piece)
+        except ValueError:
+            raise ValueError(
+                f'start must be a time like "1:23:45", "23:45", or seconds, not {value!r}.'
+            ) from None
+    return total
 
 
 def _is_justice(speaker: dict, when: list[int]) -> bool:
@@ -400,6 +463,25 @@ def _event_dates(case: dict, events: tuple[str, ...]) -> list[int]:
         if ev and ev.get("event") in events:
             out.extend(t for t in map(_epoch, ev.get("dates") or []) if t is not None)
     return out
+
+
+def _stage(case: dict) -> str:
+    """Where the case stands, from its timeline, with the date: decided
+    June 27, 2025; argued May 15, 2025, undecided; or granted March 13, 2025,
+    not yet argued. Empty when the timeline has none of those.
+    """
+    dates: dict[str, str] = {}
+    for ev in case.get("timeline") or []:
+        if ev and ev.get("event") and ev.get("dates"):
+            dates[ev["event"]] = _epoch_to_date(ev["dates"][-1])
+    if dates.get("Decided"):
+        return f"decided {dates['Decided']}"
+    for ev in ("Reargued", "Argued"):
+        if dates.get(ev):
+            return f"{ev.lower()} {dates[ev]}, undecided"
+    if dates.get("Granted"):
+        return f"granted {dates['Granted']}, not yet argued"
+    return ""
 
 
 # Words a case name keeps lowercase, except where a party's name begins.
@@ -446,6 +528,10 @@ def _citation(cit: Optional[dict]) -> str:
 
 # Oyez's opinion_type values, as what the Justice wrote. The author of the
 # majority opinion reads "majority" in both vote and opinion_type.
+# Order to list the written opinions in: Oyez gives the dissents first.
+_OPINION_ORDER = {"syllabus": 0, "majority": 1, "plurality": 1, "per curiam": 1,
+                  "concurring": 2, "dissenting": 3}
+
 _OPINION_WROTE = {
     "majority": "wrote the majority opinion",
     "plurality": "wrote the plurality opinion",
@@ -477,8 +563,11 @@ async def search_cases(query: str, limit: int = 10, include_people: bool = False
     docket number you pass to get_case, get_oral_argument, or list_term_cases.
 
     Oyez's search index runs well behind its case data, so this tool also
-    scans the four most recent Terms' case lists by name and docket number and
-    lists those matches first.
+    scans the four most recent Terms' case lists and lists those matches
+    first. There it matches the one-line holding and the question presented
+    as well as the name and docket, so a topic ("birthright citizenship",
+    "universal injunction") does find a recent case; such a row shows the
+    line it matched. Older cases still need a name, party, or docket number.
 
     Args:
         query: Case name, party name, or docket number (e.g. "Obergefell",
@@ -507,13 +596,20 @@ async def search_cases(query: str, limit: int = 10, include_people: bool = False
 
     seen: set[tuple[str, str]] = set()
     rows: list[str] = []
-    for c in recent:
-        key = (str(c.get("term")), str(c.get("docket_number")))
+    for tier, c in recent:
+        key = (str(c.get("term")), _norm_docket(c.get("docket_number")))
         if key in seen:
             continue
         seen.add(key)
         year = (c.get("citation") or {}).get("year")
-        rows.append(_result_row(c.get("name"), c.get("term"), c.get("docket_number"), year))
+        row = _result_row(c.get("name"), c.get("term"), c.get("docket_number"), year)
+        if tier == 1:
+            # Matched on the holding or the question rather than the name, so
+            # show the line that matched.
+            why = _text(c.get("description")) or _text(c.get("question"))
+            if why:
+                row += f"\n  {_clip(why, 400)}"
+        rows.append(row)
         if len(rows) >= limit:
             break
     for s in sources:
@@ -523,7 +619,7 @@ async def search_cases(query: str, limit: int = 10, include_people: bool = False
         if typ == "case":
             term = s.get("field_court_term") or "?"
             docket = s.get("field_docket_number") or "?"
-            key = (str(term), str(docket))
+            key = (str(term), _norm_docket(docket))
             if key in seen:
                 continue
             seen.add(key)
@@ -535,8 +631,8 @@ async def search_cases(query: str, limit: int = 10, include_people: bool = False
     scanned_note = ""
     if scanned:
         scanned_note = (
-            f"Terms {', '.join(scanned)} were also scanned by name and docket, "
-            "since Oyez's search index lags them."
+            f"Terms {', '.join(scanned)} were also scanned by name, docket, holding, "
+            "and question, since Oyez's search index lags them."
         )
     if not rows:
         if index_err is not None:
@@ -565,6 +661,9 @@ async def get_case(term: str, docket: str) -> str:
     facts, the question presented, the holding/conclusion, the decision with its
     vote breakdown and opinion authors, the advocates, and a list of the
     available oral-argument and opinion-announcement audio.
+
+    "Written opinions" links each opinion's text on Justia: the syllabus, the
+    opinion of the Court, and every concurrence and dissent, by author.
 
     The "Links" line is the address to cite or open. Take it as printed rather
     than building one from the Term and docket: oyez.org serves the same
@@ -595,7 +694,8 @@ def _format_case(c: dict, term: str, docket: str) -> str:
     cit = _citation(c.get("citation"))
     if cit:
         meta.append(cit)
-    meta.append(f"Docket No. {c.get('docket_number', docket)}")
+    own_docket = str(c.get("docket_number") or docket).strip()
+    meta.append(f"Docket No. {own_docket}")
     meta.append(f"Term {c.get('term', term)}")
     extra_dockets = c.get("additional_docket_numbers") or []
     if extra_dockets:
@@ -640,7 +740,7 @@ def _format_case(c: dict, term: str, docket: str) -> str:
     ):
         body = _text(c.get(key))
         if body:
-            out.append(f"\n## {heading}\n{_clip(body, 2200)}")
+            out.append(f"\n## {heading}\n{_clip(body, SUMMARY_CHARS)}")
 
     # Decision(s)
     for dec in c.get("decisions") or []:
@@ -660,7 +760,7 @@ def _format_case(c: dict, term: str, docket: str) -> str:
             parts.append(" · ".join(head))
         desc = _text(dec.get("description"))
         if desc:
-            parts.append(_clip(desc, 2200))
+            parts.append(_clip(desc, SUMMARY_CHARS))
         votes = dec.get("votes") or []
         if votes:
             vlines = []
@@ -678,6 +778,24 @@ def _format_case(c: dict, term: str, docket: str) -> str:
                 vlines.append("  - " + " · ".join(bits))
             parts.append("Votes:\n" + "\n".join(vlines))
         out.append("\n".join(parts))
+
+    # Written opinions, each with Justia's link to its text.
+    wlines: list[tuple[int, str]] = []
+    for w in c.get("written_opinion") or []:
+        if not w:
+            continue
+        typ = w.get("type") if isinstance(w.get("type"), dict) else {}
+        kind = str(typ.get("value") or "")
+        if kind == "case":  # Justia's "View Case" page: the same link as the syllabus
+            continue
+        label = typ.get("label") or w.get("title") or "Opinion"
+        who = w.get("judge_full_name") or ""
+        url = w.get("justia_opinion_url") or ""
+        line = f"- {label}" + (f" \u2014 {who}" if who else "") + (f": {url}" if url else "")
+        wlines.append((_OPINION_ORDER.get(kind, 9), line))
+    if wlines:
+        wlines.sort(key=lambda x: x[0])
+        out.append("\n## Written opinions\n" + "\n".join(line for _, line in wlines))
 
     # Advocates
     advs = c.get("advocates") or []
@@ -701,7 +819,7 @@ def _format_case(c: dict, term: str, docket: str) -> str:
     # works even where the docket number is ambiguous or is not the address.
     path = _case_path(c)
     a_term, a_docket = (path.split("/", 1) if "/" in path
-                        else (c.get("term", term), c.get("docket_number", docket)))
+                        else (c.get("term") or term, own_docket))
     if oa:
         titles = "; ".join(m.get("title", "Oral Argument") for m in oa if m)
         audio.append(
@@ -728,8 +846,8 @@ def _format_case(c: dict, term: str, docket: str) -> str:
 
 
 @_tool("List a Term's cases")
-async def list_term_cases(term: str, limit: int = 60) -> str:
-    """List the Supreme Court cases from a given Term.
+async def list_term_cases(term: str, limit: int = 60, include_summary: bool = False) -> str:
+    """List the Supreme Court cases from a given Term, in order of argument.
 
     Each line gives the docket number to pass to get_case. Where cases in the
     Term share one (Brown I and Brown II are both "No. 1"), the line gives the
@@ -739,6 +857,10 @@ async def list_term_cases(term: str, limit: int = 60) -> str:
         term: The Term year - the year the Term began, e.g. "2014" for OT2014
             (October 2014 through June/July 2015).
         limit: Maximum cases to list, 1-400 (default 60).
+        include_summary: Also give each case's stage and date (decided,
+            argued, or granted) and its one-line holding, or its question
+            presented before a decision. About 300 characters more per case;
+            the way to browse a Term by topic.
     """
     limit = max(1, min(int(limit), 400))
     try:
@@ -757,12 +879,19 @@ async def list_term_cases(term: str, limit: int = 60) -> str:
         if not case:
             continue
         nm = case.get("name") or "(untitled)"
-        dk = case.get("docket_number") or "?"
+        dk = str(case.get("docket_number") or "?").strip()
         row = f"- {nm} — No. {dk}"
         path = _case_path(case)
         if _norm_docket(dk) in shared and "/" in path:
             p_term, p_docket = path.split("/", 1)
             row += f' -> get_case(term="{p_term}", docket="{p_docket}")'
+        if include_summary:
+            stage = _stage(case)
+            if stage:
+                row += f" \u00b7 {stage}"
+            summary = _text(case.get("description")) or _text(case.get("question"))
+            if summary:
+                row += f"\n  {_clip(summary, 400)}"
         rows.append(row)
     shown = len(rows)
     header = f"Term {term}: {total} case(s)"
@@ -779,15 +908,21 @@ async def get_oral_argument(
     docket: str,
     speaker: Optional[str] = None,
     speaker_type: Optional[str] = None,
+    find: Optional[str] = None,
+    start: Optional[str] = None,
     part: Optional[int] = None,
     include_timestamps: bool = False,
     max_chars: int = 18000,
 ) -> str:
-    """Fetch the oral-argument transcript for a case, optionally filtered by speaker.
+    """Fetch the oral-argument transcript for a case, optionally filtered by
+    speaker, by text, or from a point in time.
 
     The transcript is returned as "Speaker: text" turns. Use the filters to zero
     in on, for example, one Justice's questions ("only Justice Scalia's
-    questions" -> speaker="Scalia").
+    questions" -> speaker="Scalia") or every turn that mentions a word
+    (find="personhood"). A full argument is far longer than the default cap;
+    to read one straight through, follow the note at the end of a truncated
+    transcript, which names the part and start to continue from.
 
     Args:
         term: The Term year, e.g. "2014".
@@ -797,11 +932,18 @@ async def get_oral_argument(
         speaker_type: "justice" or "advocate" to include only that group.
             Someone who argued the case before joining the Court (Kagan as
             Solicitor General, say) counts as an advocate.
+        find: Case-insensitive text; include only the turns that contain it
+            (e.g. "corporate", "personhood"). Combine with speaker_type for
+            what one side said about it.
+        start: Resume at this point in the recording, as "H:MM:SS", "M:SS",
+            or seconds. Turns before it in the first selected session are
+            skipped; give part as well when there are several sessions.
         part: For arguments split into sessions, the 1-based session index;
             default is all sessions.
         include_timestamps: Prefix each turn with its start time (H:MM:SS).
         max_chars: Soft cap on transcript length, 1000-200000 (default 18000).
-            When hit, output is truncated with a note; narrow it with `speaker`.
+            When hit, output is truncated with a note that says where to
+            continue from.
     """
     try:
         c = await _fetch_case(term, docket)
@@ -809,7 +951,7 @@ async def get_oral_argument(
         return f"⚠️ {e}\nTip: use search_cases to find the correct Term and docket."
     return await _render_media(
         c, c.get("oral_argument_audio") or [], "oral argument", ("Argued", "Reargued"),
-        speaker, speaker_type, part, include_timestamps, max_chars,
+        speaker, speaker_type, find, start, part, include_timestamps, max_chars,
     )
 
 
@@ -818,6 +960,8 @@ async def get_opinion_announcement(
     term: str,
     docket: str,
     speaker: Optional[str] = None,
+    find: Optional[str] = None,
+    start: Optional[str] = None,
     part: Optional[int] = None,
     include_timestamps: bool = False,
     max_chars: int = 18000,
@@ -830,6 +974,11 @@ async def get_opinion_announcement(
         docket: The docket number, e.g. "14-556".
         speaker: Case-insensitive substring of a speaker's name to include only
             their turns.
+        find: Case-insensitive text; include only the turns that contain it.
+        start: Resume at this point, as "H:MM:SS", "M:SS", or seconds; turns
+            before it in the first selected announcement are skipped. A
+            truncated transcript ends by naming the part and start to continue
+            from.
         part: 1-based index when several announcements exist (e.g. the majority
             announcement and a separate dissent); default is all.
         include_timestamps: Prefix each turn with its start time.
@@ -841,7 +990,7 @@ async def get_opinion_announcement(
         return f"⚠️ {e}\nTip: use search_cases to find the correct Term and docket."
     return await _render_media(
         c, c.get("opinion_announcement") or [], "opinion announcement", ("Decided",),
-        speaker, None, part, include_timestamps, max_chars,
+        speaker, None, find, start, part, include_timestamps, max_chars,
     )
 
 
@@ -852,6 +1001,8 @@ async def _render_media(
     events: tuple[str, ...],
     speaker: Optional[str],
     speaker_type: Optional[str],
+    find: Optional[str],
+    start: Optional[str],
     part: Optional[int],
     include_timestamps: bool,
     max_chars: int,
@@ -877,6 +1028,11 @@ async def _render_media(
     elif st is not None:
         return "speaker_type must be 'justice' or 'advocate'."
     sp = (speaker or "").strip().lower() or None
+    fq = (find or "").strip().lower() or None
+    try:
+        start_s = _parse_time(start)
+    except ValueError as e:
+        return str(e)
     max_chars = max(1000, min(int(max_chars), 200000))
     # The media carry no date of their own, so a speaker is judged a Justice
     # or not against the case's argument (or decision) dates.
@@ -932,6 +1088,10 @@ async def _render_media(
         active.append(f"speaker~={speaker!r}")
     if st:
         active.append(f"speaker_type={st}")
+    if fq:
+        active.append(f"find~={find!r}")
+    if start_s is not None:
+        active.append(f"start={_hms(start_s)}")
     if part is not None:
         active.append(f"part={part}")
     if active:
@@ -942,9 +1102,13 @@ async def _render_media(
     used = 0
     truncated = False
     matched = 0
-    for title, media in fetched:
+    cut: Optional[tuple[int, Optional[float]]] = None  # (session number, turn start)
+    for i, (title, media) in enumerate(fetched):
         if truncated:
             break
+        session_no = int(part) if part is not None else i + 1
+        # `start` resumes within the first selected session; later ones are whole.
+        skip_before = start_s if i == 0 else None
         body.append(f"\n## {title}")
         if not media:
             body.append("_(no transcript link)_")
@@ -965,6 +1129,9 @@ async def _render_media(
             if truncated:
                 break
             for turn in sec.get("turns") or []:
+                t0 = _seconds(turn.get("start"))
+                if skip_before is not None and t0 is not None and t0 < skip_before:
+                    continue
                 spk = turn.get("speaker") or {}
                 nm = spk.get("name") or "Unknown"
                 if sp and sp not in nm.lower():
@@ -980,7 +1147,9 @@ async def _render_media(
                 ).strip()
                 if not text:
                     continue
-                prefix = f"[{_hms(turn.get('start'))}] " if include_timestamps else ""
+                if fq and fq not in text.lower():
+                    continue
+                prefix = f"[{_hms(t0)}] " if include_timestamps else ""
                 line = f"{prefix}{nm}: {text}"
                 remaining = max_chars - used
                 if len(line) > remaining:
@@ -991,6 +1160,7 @@ async def _render_media(
                         body.append(_clip(line, remaining))
                         matched += 1
                     truncated = True
+                    cut = (session_no, t0)
                     break
                 body.append(line)
                 used += len(line) + 1
@@ -998,14 +1168,21 @@ async def _render_media(
 
     if matched == 0 and not truncated:
         hint = ""
-        if sp or st:
-            hint = " No turns matched the filter - check the speaker roster above."
+        if sp or st or fq or start_s is not None:
+            hint = (" No turns matched the filters (speaker, speaker_type, find, start);"
+                    " the roster above lists every speaker.")
         body.append(f"\n_(no transcript text found.{hint})_")
     if truncated:
-        body.append(
-            f"\n\u2026 truncated at ~{max_chars} characters; the last turn shown may be "
-            "cut short. Narrow it with speaker=\"<name>\", pick a part=, or raise max_chars."
-        )
+        note = (f"\n\u2026 truncated at ~{max_chars} characters; the last turn shown "
+                "may be cut short.")
+        if cut and cut[1] is not None:
+            # Name the turn that was cut, so the next call picks up there.
+            resume = f'start="{_hms(cut[1])}"'
+            if len(media_list) > 1:
+                resume = f"part={cut[0]}, {resume}"
+            note += f" To continue from that turn, call again with {resume}."
+        note += " Or narrow it with speaker, speaker_type, or find, or raise max_chars."
+        body.append(note)
 
     return "\n".join(head) + "\n" + "\n".join(body)
 

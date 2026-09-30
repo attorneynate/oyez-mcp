@@ -189,6 +189,88 @@ async def main():
                 sys.exit("FAIL  a low max_chars returned no transcript text:\n" + text_of(r))
             print("OK  a low max_chars still returns text (Roberts, Obergefell announcement)")
 
+            # Oyez's newer conclusions run past 3000 characters; a 2200 cap
+            # cut Trump v. CASA off in the middle of the concurrences.
+            out = text_of(await session.call_tool("get_case", {"term": "2024", "docket": "24a884"}))
+            m = re.search(r"## Conclusion\n(.*?)(?=\n## |\Z)", out, re.S)
+            if not m or m.group(1).rstrip().endswith("\u2026"):
+                sys.exit("FAIL  get_case(Trump v. CASA) still clips the conclusion:\n" + out[-600:])
+            print("OK  a long conclusion comes back whole (Trump v. CASA)")
+
+            # A docket is one path segment and nothing more. Unquoted,
+            # "../../people/..." fetched a person and rendered it as a case.
+            out = text_of(await session.call_tool(
+                "get_case", {"term": "2024", "docket": "../../people/john_g_roberts_jr"}))
+            if out.startswith("# ") or "Roberts" in out.split("\n", 1)[0]:
+                sys.exit("FAIL  a docket with '../' reached another API path:\n" + out[:300])
+            print("OK  a docket cannot walk the API path")
+
+            # Some Oyez docket numbers carry a trailing space ("23-1197 "), and
+            # it used to reach the Term list and the search rows.
+            out = text_of(await session.call_tool(
+                "list_term_cases", {"term": str(term_year), "limit": 400}))
+            bad = [l for l in out.splitlines() if l != l.rstrip()]
+            if bad:
+                sys.exit("FAIL  list_term_cases printed trailing whitespace:\n" + bad[0] + "|")
+            out = text_of(await session.call_tool("search_cases", {"query": found[1], "limit": 3}))
+            if any(l != l.rstrip() for l in out.splitlines()):
+                sys.exit("FAIL  search_cases printed trailing whitespace:\n" + out)
+            print("OK  docket numbers are printed without Oyez's trailing spaces")
+
+            # Written opinions with Justia's link to each: the instructions send
+            # the model to the opinion for what the Court held.
+            out = text_of(await session.call_tool("get_case", {"term": "2014", "docket": "14-556"}))
+            kennedy = ("Opinion of the Court \u2014 Anthony M. Kennedy: "
+                       "https://supreme.justia.com/cases/federal/us/576/14-556/opinion3.html")
+            if "## Written opinions" not in out or kennedy not in out:
+                sys.exit("FAIL  get_case(Obergefell) did not list the written opinions:\n" + out[-1500:])
+            print("OK  written opinions are listed with their Justia links (Obergefell)")
+
+            # With include_summary, a Term list gives each case's stage and date
+            # and its one-line holding.
+            prev = str(term_year - 1)
+            out = text_of(await session.call_tool(
+                "list_term_cases", {"term": prev, "limit": 5, "include_summary": True}))
+            row = re.search(
+                r"^- (.+?) \u2014 No\. \S+.* \u00b7 (decided|argued|granted) \w+ \d{1,2}, \d{4}.*\n  (\S.+)$",
+                out, re.M)
+            if not row:
+                sys.exit(f"FAIL  list_term_cases({prev}, include_summary) gave no stage or summary:\n{out}")
+            print(f"OK  include_summary gives each case's stage and holding ({row.group(1)})")
+
+            # In the recent Terms a query is matched against the holding and the
+            # question presented too, so a topic finds a case the index lacks.
+            words = sorted(re.findall(r"[A-Za-z]{6,}", row.group(3)), key=len, reverse=True)[:2]
+            topic = " ".join(words)
+            out = text_of(await session.call_tool("search_cases", {"query": topic, "limit": 50}))
+            if row.group(1) not in out:
+                sys.exit(f"FAIL  search_cases({topic!r}) did not find {row.group(1)!r} by its holding:\n{out}")
+            print(f"OK  a topic finds a recent case by its holding ({topic!r} -> {row.group(1)})")
+
+            # find keeps only the turns that contain the text.
+            out = text_of(await session.call_tool(
+                "get_oral_argument",
+                {"term": "2014", "docket": "14-556", "find": "millennia", "max_chars": 4000}))
+            turns = [l for l in out.split("\n## ", 1)[1].splitlines()[1:]
+                     if re.match(r"^[^_\u2026#].*: ", l)]
+            if not turns or any("millennia" not in l.lower() for l in turns):
+                sys.exit("FAIL  find='millennia' returned turns without it:\n" + out)
+            print(f"OK  find keeps only the matching turns ({len(turns)} with 'millennia', Obergefell)")
+
+            # A truncated transcript names the part and start to continue from,
+            # and that call resumes at the turn that was cut.
+            args = {"term": "2014", "docket": "14-556", "max_chars": 1500, "include_timestamps": True}
+            out = text_of(await session.call_tool("get_oral_argument", args))
+            m = re.search(r'call again with part=(\d+), start="([\d:]+)"', out)
+            if not m:
+                sys.exit("FAIL  the truncation note did not say where to continue:\n" + out[-400:])
+            out2 = text_of(await session.call_tool(
+                "get_oral_argument", {**args, "part": int(m.group(1)), "start": m.group(2)}))
+            first = re.search(r"^\[([\d:]+)\] ", out2, re.M)
+            if not first or first.group(1) != m.group(2):
+                sys.exit(f"FAIL  start={m.group(2)!r} did not resume at that turn:\n" + out2[:600])
+            print(f"OK  a truncated transcript says where to continue, and start resumes there ({m.group(2)})")
+
     print("\nAll good. Now register it:\n"
           "  claude mcp add --scope user oyez -- <venv-python> <path-to-server.py>")
 
