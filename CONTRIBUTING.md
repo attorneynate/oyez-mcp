@@ -22,6 +22,10 @@ tools, and pulls a real transcript from Oyez. It hits the live API, so it needs 
 network connection and it will fail if Oyez is down or rate-limiting you. Run it
 before and after your change.
 
+To try the packaged form, the one `uvx` installs, run `uvx --from . oyez-mcp` from
+the repo folder. It builds the package and starts the server, which then waits for a
+client on stdin; end it with Ctrl+C.
+
 ## Reporting a bug
 
 Include the tool call that went wrong — the tool name and its arguments, especially
@@ -53,6 +57,8 @@ oyez.org and wrong here.
   fan-out, no polling. Add a `max_chars`-style cap to anything that can return an
   unbounded amount of text.
 - Update `README.md` if you add or rename a tool or change its parameters.
+- The version lives in two places, `VERSION` in `server.py` and `version` in
+  `pyproject.toml`. Bump both together; the selftest checks that they match.
 
 ## Scope
 

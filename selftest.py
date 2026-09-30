@@ -43,6 +43,15 @@ async def main():
                     sys.exit(f"FAIL  {t.name} has an output schema, so answers go out twice")
             print(f"OK  version {init.server_info.version}, instructions, read-only tools")
 
+            # The version is declared twice, and a mismatch would ship a package
+            # whose User-Agent and metadata disagree.
+            with open(os.path.join(HERE, "pyproject.toml"), encoding="utf-8") as f:
+                m = re.search(r'^version = "([^"]+)"', f.read(), re.M)
+            if not m or m.group(1) != init.server_info.version:
+                sys.exit(f"FAIL  pyproject.toml says version {m.group(1) if m else '?'} and "
+                         f"the server says {init.server_info.version}; bump both together")
+            print("OK  pyproject.toml and server.py agree on the version")
+
             r = await session.call_tool("search_cases", {"query": "obergefell", "limit": 1})
             # A str tool with structured output repeats its whole answer as
             # structuredContent {"result": ...}; transcripts went out twice.

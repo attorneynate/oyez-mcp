@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "oyez-mcp"
+version = "1.3"
+description = "MCP server for the Oyez archive of U.S. Supreme Court cases, decisions, and oral-argument transcripts"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=2,<3",
+    "httpx>=0.27",
+]
+keywords = ["mcp", "oyez", "supreme court", "scotus", "oral argument", "legal research"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Legal Industry",
+    "Intended Audience :: Education",
+    "Programming Language :: Python :: 3",
+    "Topic :: Education",
+]
+
+[project.urls]
+Homepage = "https://github.com/attorneynate/oyez-mcp"
+Issues = "https://github.com/attorneynate/oyez-mcp/issues"
+
+# The command a client registers. It is server.main(), the same thing
+# `python server.py` runs.
+[project.scripts]
+oyez-mcp = "server:main"
+
+# One module at the repo root, and only that one: selftest.py stays out.
+[tool.setuptools]
+py-modules = ["server"]

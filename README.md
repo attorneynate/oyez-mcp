@@ -109,15 +109,55 @@ truncated transcript: it names the `part` and `start` to continue from. Raise
 
 ## Requirements
 
-- Python 3.10 or newer
 - An MCP client — Claude Code (CLI or the desktop app's Code tab), Claude Desktop, or
   anything else that speaks MCP over stdio
+- [uv](https://docs.astral.sh/uv/), or Python 3.10 or newer
 
 ## Install
 
-Clone it, make a virtual environment, install two dependencies.
+### With uv
 
-### Windows (PowerShell)
+Nothing to clone and no paths to spell out. `uvx` fetches the repo, builds it,
+installs its two dependencies into an isolated environment of its own, and runs the
+server's `oyez-mcp` command. The first start does that work and can take a minute;
+later starts come from the cache.
+
+For Claude Code, run this in a normal terminal, not inside a Claude Code session:
+
+```bash
+claude mcp add --scope user oyez -- uvx --from git+https://github.com/attorneynate/oyez-mcp oyez-mcp
+```
+
+`--scope user` registers the server once for **all** your projects; drop the flag to
+register it in the current project only. Oyez's data spans everything, so user scope
+usually makes sense. Check it with `claude mcp list`, then start Claude Code and run
+`/mcp` in the session — `oyez` should show as connected with its five tools.
+
+For Claude Desktop and other MCP clients, add a stdio server to the client's config.
+For Claude Desktop that is `claude_desktop_config.json`, reachable from
+**Settings → Developer → Edit Config**:
+
+```json
+{
+  "mcpServers": {
+    "oyez": {
+      "command": "uvx",
+      "args": ["--from", "git+https://github.com/attorneynate/oyez-mcp", "oyez-mcp"]
+    }
+  }
+}
+```
+
+Restart the client afterward. If it reports that it cannot find `uvx`, give the
+command's full path instead; `where uvx` on Windows or `which uvx` elsewhere prints
+it.
+
+### From source
+
+This is the path for working on the server, or for a machine without uv. Clone it,
+make a virtual environment, install two dependencies.
+
+#### Windows (PowerShell)
 
 Keep the folder somewhere **outside `AppData`**. The Windows Store build of Python
 redirects `AppData` paths, which breaks `venv` creation there; your home directory is
@@ -136,7 +176,7 @@ Optional, and worth it — confirm it works end to end before registering:
 .\.venv\Scripts\python.exe selftest.py
 ```
 
-### macOS / Linux
+#### macOS / Linux
 
 ```bash
 git clone https://github.com/attorneynate/oyez-mcp.git
@@ -153,14 +193,10 @@ python3 -m venv .venv
 transcript. If it prints `All good`, the server itself works and anything that goes
 wrong next is configuration.
 
-## Register it with your client
+Then point the client at the **venv's** Python and the absolute path to `server.py`.
+There is no activation step — the interpreter path is the activation.
 
-Point the client at the **venv's** Python and the absolute path to `server.py`. There
-is no activation step — the interpreter path is the activation.
-
-### Claude Code
-
-Run this in a normal terminal, not inside a Claude Code session:
+For Claude Code, from the repo folder in a normal terminal:
 
 ```bash
 claude mcp add --scope user oyez -- "$(pwd)/.venv/bin/python" "$(pwd)/server.py"
@@ -172,17 +208,7 @@ On Windows, spell out the absolute paths:
 claude mcp add --scope user oyez -- "C:\path\to\oyez-mcp\.venv\Scripts\python.exe" "C:\path\to\oyez-mcp\server.py"
 ```
 
-`--scope user` registers the server once for **all** your projects; drop the flag to
-register it in the current project only. Oyez's data spans everything, so user scope
-usually makes sense.
-
-Check it with `claude mcp list`, then start Claude Code and run `/mcp` in the
-session — `oyez` should show as connected with its five tools.
-
-### Claude Desktop and other MCP clients
-
-Add a stdio server to the client's config. For Claude Desktop that is
-`claude_desktop_config.json`, reachable from **Settings → Developer → Edit Config**:
+For Claude Desktop and other clients:
 
 ```json
 {
@@ -224,8 +250,14 @@ use full absolute paths.
 ## Troubleshooting
 
 - **Slow first start.** A stdio server's first launch can exceed Claude Code's
-  30-second startup timeout. Raise it with the `MCP_TIMEOUT` environment variable, in
-  milliseconds — `MCP_TIMEOUT=60000` — before starting Claude Code.
+  30-second startup timeout, and `uvx`'s first start also fetches and builds the
+  package. Raise it with the `MCP_TIMEOUT` environment variable, in milliseconds —
+  `MCP_TIMEOUT=60000` — before starting Claude Code.
+- **`uvx` fails to fetch or build.** It needs network access the first time, for the
+  repo and the two dependencies. Run
+  `uvx --from git+https://github.com/attorneynate/oyez-mcp oyez-mcp` in a terminal to
+  see the error; a server that starts then sits waiting for input, so end it with
+  Ctrl+C.
 - **`No module named 'mcp'`.** You registered a system Python instead of the venv's.
   Re-run `claude mcp add`, or fix the config, pointing at the `.venv` interpreter.
 - **"already exists at that scope"** when re-adding. Remove the old entry first with
@@ -240,7 +272,9 @@ use full absolute paths.
 
 ## How it works
 
-`server.py` is a single-file stdio MCP server. It queries the same endpoints
+`server.py` is a single-file stdio MCP server; `pyproject.toml` packages it so
+`uvx` can fetch and run it, and the `oyez-mcp` command it defines is `server.main()`,
+the same thing `python server.py` runs. It queries the same endpoints
 oyez.org's own front end uses, then formats the JSON into Markdown for the model
 rather than passing raw API responses through: a decision becomes a list of each
 Justice's vote, what they wrote, and whose opinions they joined, and transcripts
