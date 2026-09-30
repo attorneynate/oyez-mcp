@@ -119,6 +119,26 @@ async def main():
                 sys.exit("FAIL  an ambiguous docket did not name both cases:\n" + out)
             print("OK  an ambiguous docket names both addresses instead of guessing")
 
+            # Oyez writes an original-jurisdiction docket "156-orig", and its
+            # search index matches no other spelling of it.
+            out = text_of(await session.call_tool(
+                "search_cases", {"query": "No. 156, Orig.", "limit": 3}))
+            if "New York v. New Jersey" not in out:
+                sys.exit("FAIL  search_cases('No. 156, Orig.') missed New York v. New Jersey:\n" + out)
+            out = text_of(await session.call_tool(
+                "get_case", {"term": "2022", "docket": "22O156"}))
+            if "New York v. New Jersey" not in out:
+                sys.exit("FAIL  get_case(2022, 22O156) missed New York v. New Jersey:\n" + out)
+            print("OK  an original-jurisdiction docket resolves however it is written (156, Orig.)")
+
+            # The index matches an application docket only in lowercase, so
+            # "20A87" as the Court writes it used to find nothing outside the
+            # recent Terms the server scans itself.
+            out = text_of(await session.call_tool("search_cases", {"query": "20A87", "limit": 3}))
+            if "roman catholic diocese of brooklyn" not in out.lower():
+                sys.exit("FAIL  search_cases('20A87') missed Roman Catholic Diocese v. Cuomo:\n" + out)
+            print("OK  an application docket is found as the Court writes it (20A87)")
+
             # The majority author reads "majority" as both vote and opinion type,
             # which once hid the fact that Kennedy wrote Obergefell.
             out = text_of(await session.call_tool("get_case", {"term": "2014", "docket": "14-556"}))

@@ -39,7 +39,8 @@ yourself does not 404 when it is wrong — it answers `200` and renders an empty
 
 **`search_cases`**
 
-- `query` — case name, party name, or docket number
+- `query` — case name, party name, or docket number. An original-jurisdiction docket
+  can be written `"156-orig"`, `"No. 156, Orig."`, or `"22O156"`.
 - `limit` — 1–50 (default 10)
 - `include_people` — also return matching Justices and advocates (default false)
 
@@ -219,13 +220,15 @@ use full absolute paths.
 
 `server.py` is a single-file stdio MCP server. It queries the same endpoints
 oyez.org's own front end uses, then formats the JSON into Markdown for the model
-rather than passing raw API responses through: vote breakdowns become a table,
-transcripts become `Speaker: text` turns.
+rather than passing raw API responses through: a decision becomes a list of each
+Justice's vote, what they wrote, and whose opinions they joined, and transcripts
+become `Speaker: text` turns.
 
 There is no database, and every tool call is a live HTTP request, with one exception:
-the four most recent Terms' case lists, which `search_cases` scans, are kept in memory
-for ten minutes. `max_chars` exists because full transcripts are big enough to matter
-to a context window.
+a Term's case list, once fetched, is kept in memory for ten minutes. That covers the
+four recent Terms `search_cases` scans, any Term `list_term_cases` lists, and the Term
+`get_case` searches when a docket number is not the case's address. `max_chars`
+exists because full transcripts are big enough to matter to a context window.
 
 ## Contributing
 

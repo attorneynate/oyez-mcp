@@ -48,8 +48,8 @@ USER_AGENT = f"oyez-mcp/{VERSION} (Claude Code MCP server)"
 
 # Oyez's search index runs well behind its case data (in September 2026 it had
 # no 2025 Term case and only 21 of the 62 in the 2024 Term), so search_cases
-# also scans the most recent Terms' case lists. Those lists are the one thing
-# kept in memory, briefly.
+# also scans the most recent Terms' case lists. Term case lists are the one
+# thing kept in memory, briefly.
 TERM_CACHE_TTL = 600.0  # seconds
 
 INSTRUCTIONS = """\
@@ -172,14 +172,20 @@ def _recent_terms(today: Optional[datetime] = None) -> list[str]:
 
 
 _WORD_RE = re.compile(r"[a-z0-9]+")
-_DOCKET_RE = re.compile(r"^\d{1,3}-\d{1,5}$|^\d{2}[ao]\d{1,5}$")  # 25-332, 22a123, 22o145
+_DOCKET_RE = re.compile(r"^\d{1,3}-\d{1,5}$|^\d{2}a\d{1,5}$|^\d{1,4}-orig$")  # 25-332, 22a123, 156-orig
+# Original jurisdiction. Oyez writes "156-orig", and its search index finds
+# only that spelling; the Court writes "No. 156, Orig." and, on its docket
+# site, "22O156".
+_ORIG_RE = re.compile(r"^(?:(\d{1,4})\s*[-,]?\s*orig(?:inal)?\.?|\d{2}o(\d{1,4}))$")
 _NAME_STOP = frozenset("v vs versus the of in re et al inc co corp llc ltd and a an".split())
 
 
 def _norm_docket(value: Any) -> str:
     s = str(value or "").strip().lower()
     s = re.sub(r"^(no\.?|docket)\s*", "", s)
-    return re.sub(r"[\u2010\u2011\u2012\u2013\u2014]", "-", s)
+    s = re.sub(r"[\u2010\u2011\u2012\u2013\u2014]", "-", s)
+    m = _ORIG_RE.match(s)
+    return f"{m.group(1) or m.group(2)}-orig" if m else s
 
 
 def _name_tokens(value: Any) -> list[str]:
@@ -458,7 +464,8 @@ async def search_cases(query: str, limit: int = 10, include_people: bool = False
 
     Args:
         query: Case name, party name, or docket number (e.g. "Obergefell",
-            "new york times v sullivan", "14-556").
+            "new york times v sullivan", "14-556"). An original-jurisdiction
+            docket can be written "156-orig", "No. 156, Orig.", or "22O156".
         limit: Maximum number of cases to return, 1-50 (default 10).
         include_people: Also include matching Justices/advocates (default False).
     """
@@ -467,9 +474,15 @@ async def search_cases(query: str, limit: int = 10, include_people: bool = False
     if not query:
         return "Give search_cases a case name, a party name, or a docket number."
 
+    # A docket number goes to the index in the one spelling it matches:
+    # "156-orig" for an original-jurisdiction case, and lowercase for an
+    # application ("20a87" finds Roman Catholic Diocese v. Cuomo; "20A87" does not).
+    qd = _norm_docket(query)
+    index_query = qd if _DOCKET_RE.match(qd) else query
+
     index_err: Optional[OyezError] = None
     try:
-        sources = await _search(query, size=limit * 3 + 5)
+        sources = await _search(index_query, size=limit * 3 + 5)
     except OyezError as e:
         sources, index_err = [], e
     recent, scanned = await _scan_recent_terms(query)
@@ -620,7 +633,8 @@ def _format_case(c: dict, term: str, docket: str) -> str:
             head.append(f"Winning party: {dec['winning_party']}")
         maj, minn = dec.get("majority_vote"), dec.get("minority_vote")
         if maj is not None or minn is not None:
-            head.append(f"Vote: {maj}-{minn}")
+            # Oyez leaves a side empty now and then; print "?" rather than "None".
+            head.append(f"Vote: {'?' if maj is None else maj}-{'?' if minn is None else minn}")
         if dec.get("decision_type"):
             head.append(f"({dec['decision_type']})")
         if head:
