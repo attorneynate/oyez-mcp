@@ -38,6 +38,9 @@ oyez.org and wrong here.
 - Match the style already in `server.py`: type hints, small helpers, no new
   dependencies unless there is no other way. It is currently `mcp` and `httpx`, and
   keeping it there is a feature.
+- Register a tool with `@_tool("Title")`, not `@app.tool()`. It marks the tool
+  read-only and turns off structured output, which would otherwise send every
+  answer twice.
 - Tool docstrings are the model-facing documentation. If you change a tool's
   arguments or behavior, update the docstring in the same commit — the model reads
   it, so a stale one is a real bug.

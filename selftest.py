@@ -31,7 +31,20 @@ async def main():
             tools = await session.list_tools()
             print("OK  tools:", ", ".join(t.name for t in tools.tools))
 
+            if not init.server_info.version or not init.instructions:
+                sys.exit("FAIL  the server sent no version or no instructions")
+            for t in tools.tools:
+                if not (t.annotations and t.annotations.read_only_hint):
+                    sys.exit(f"FAIL  {t.name} is not marked read-only")
+                if t.output_schema:
+                    sys.exit(f"FAIL  {t.name} has an output schema, so answers go out twice")
+            print(f"OK  version {init.server_info.version}, instructions, read-only tools")
+
             r = await session.call_tool("search_cases", {"query": "obergefell", "limit": 1})
+            # A str tool with structured output repeats its whole answer as
+            # structuredContent {"result": ...}; transcripts went out twice.
+            if r.structured_content:
+                sys.exit("FAIL  search_cases sent its answer twice (structuredContent)")
             print("OK  search_cases ->\n" + text_of(r))
 
             r = await session.call_tool(

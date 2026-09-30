@@ -25,6 +25,7 @@ from typing import Any, Optional
 
 import httpx
 from mcp.server.mcpserver import MCPServer
+from mcp.types import ToolAnnotations
 
 API = "https://api.oyez.org"
 SEARCH_URL = "https://beta-search.oyez.org/elasticsearch_index_scotus_nodes/_search"
@@ -42,7 +43,8 @@ SEARCH_FIELDS = [
     "field_question:value",
     "field_conclusion:value",
 ]
-USER_AGENT = "oyez-mcp/1.1 (Claude Code MCP server)"
+VERSION = "1.2"
+USER_AGENT = f"oyez-mcp/{VERSION} (Claude Code MCP server)"
 
 # Oyez's search index runs well behind its case data (in September 2026 it had
 # no 2025 Term case and only 21 of the 62 in the 2024 Term), so search_cases
@@ -50,7 +52,39 @@ USER_AGENT = "oyez-mcp/1.1 (Claude Code MCP server)"
 # kept in memory, briefly.
 TERM_CACHE_TTL = 600.0  # seconds
 
-app = MCPServer("oyez")
+INSTRUCTIONS = """\
+Oyez data on U.S. Supreme Court cases: case summaries, decisions and votes,
+and oral-argument and opinion-announcement transcripts.
+
+Every case tool takes a Term plus a docket number. Get that pair from
+search_cases (case name, party, or docket number; not a topic search) or
+list_term_cases, then pass it to get_case, get_oral_argument, or
+get_opinion_announcement.
+
+To cite or open a case on oyez.org, use the address on get_case's Links line.
+Do not compose one: a wrong oyez.org/cases/ path still loads, as an empty page.
+
+Transcripts are long. Filter with speaker or speaker_type before raising
+max_chars. Oyez's summaries are secondary sources; for what the Court held,
+go to the opinion."""
+
+# WARNING, not the SDK's default INFO: at INFO, httpx writes a line to stderr
+# for every request Oyez answers.
+app = MCPServer("oyez", version=VERSION, instructions=INSTRUCTIONS, log_level="WARNING")
+
+# Every tool only reads from Oyez, and returns Markdown text.
+_READ_ONLY = ToolAnnotations(read_only_hint=True, idempotent_hint=True, open_world_hint=True)
+
+
+def _tool(title: str):
+    """Register a tool as read-only and text-only.
+
+    structured_output=False because a tool that returns str otherwise gets an
+    output schema, and every answer goes out a second time as
+    structuredContent {"result": ...}, doubling each transcript on the wire.
+    """
+    return app.tool(title=title, annotations=_READ_ONLY, structured_output=False)
+
 
 _client: Optional[httpx.AsyncClient] = None
 
@@ -408,7 +442,7 @@ def _first(value: Any) -> Optional[dict]:
 # --------------------------------------------------------------------------- #
 # Tools
 # --------------------------------------------------------------------------- #
-@app.tool()
+@_tool("Search Supreme Court cases")
 async def search_cases(query: str, limit: int = 10, include_people: bool = False) -> str:
     """Search Oyez for U.S. Supreme Court cases by case name, party, or docket number.
 
@@ -494,7 +528,7 @@ async def search_cases(query: str, limit: int = 10, include_people: bool = False
     return header + "\n".join(rows) + footer
 
 
-@app.tool()
+@_tool("Get a Supreme Court case")
 async def get_case(term: str, docket: str) -> str:
     """Full details for one Supreme Court case: parties, citation, key dates,
     facts, the question presented, the holding/conclusion, the decision with its
@@ -660,7 +694,7 @@ def _format_case(c: dict, term: str, docket: str) -> str:
     return "\n".join(out)
 
 
-@app.tool()
+@_tool("List a Term's cases")
 async def list_term_cases(term: str, limit: int = 60) -> str:
     """List the Supreme Court cases from a given Term.
 
@@ -692,7 +726,7 @@ async def list_term_cases(term: str, limit: int = 60) -> str:
     return header + ":\n" + "\n".join(rows) + footer
 
 
-@app.tool()
+@_tool("Get an oral-argument transcript")
 async def get_oral_argument(
     term: str,
     docket: str,
@@ -732,7 +766,7 @@ async def get_oral_argument(
     )
 
 
-@app.tool()
+@_tool("Get an opinion-announcement transcript")
 async def get_opinion_announcement(
     term: str,
     docket: str,
