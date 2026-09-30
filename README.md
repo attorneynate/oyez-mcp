@@ -55,6 +55,9 @@ yourself does not 404 when it is wrong — it answers `200` and renders an empty
   June/July 2015)
 - `limit` — 1–400 (default 60)
 
+Where cases in a Term share a docket number, as Brown I and Brown II share "No. 1",
+the line for each one gives the `get_case` call that reaches it.
+
 **`get_oral_argument`**
 
 - `term`, `docket` — as above

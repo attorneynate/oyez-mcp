@@ -20,6 +20,7 @@ from __future__ import annotations
 import html
 import re
 import time
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
@@ -155,6 +156,10 @@ async def _term_cases(term: str) -> list[dict]:
     if isinstance(data, dict):
         data = [data]
     cases = [c for c in (data or []) if isinstance(c, dict)]
+    # Drop what has expired, so a long session that lists many Terms does
+    # not keep every one of them.
+    for old in [k for k, (at, _) in _TERM_CACHE.items() if now - at >= TERM_CACHE_TTL]:
+        del _TERM_CACHE[old]
     _TERM_CACHE[term] = (now, cases)
     return cases
 
@@ -397,13 +402,26 @@ def _event_dates(case: dict, events: tuple[str, ...]) -> list[int]:
     return out
 
 
+# Words a case name keeps lowercase, except where a party's name begins.
+_SMALL_WORDS = frozenset(
+    "a an and as at by for in of on or the to re ex rel. et al.".split()
+)
+
+
 def _nice_title(raw: str) -> str:
-    """Title-case an Oyez search title ("obergefell v. hodges") for display."""
-    out = []
+    """Title-case an Oyez search title ("obergefell v. hodges") for display.
+
+    The index keeps only a lowercase title, so acronyms come back as words:
+    "fcc v. fox television stations" reads "Fcc v. Fox Television Stations".
+    """
+    out: list[str] = []
     for w in (raw or "").split():
         low = w.lower()
+        starts_party = not out or out[-1] == "v."
         if low in ("v.", "v"):
             out.append("v.")
+        elif low in _SMALL_WORDS and not starts_party:
+            out.append(low)
         elif w.isupper():
             out.append(w)
         else:
@@ -596,8 +614,9 @@ def _format_case(c: dict, term: str, docket: str) -> str:
     for ev in c.get("timeline") or []:
         if not ev:
             continue
-        dates = ev.get("dates") or []
-        when = _epoch_to_date(dates[0]) if dates else ""
+        # Every day, not the first: Brown I was argued over three.
+        days = (_epoch_to_date(t) for t in ev.get("dates") or [])
+        when = "; ".join(dict.fromkeys(d for d in days if d))
         if ev.get("event") and when:
             events.append(f"{ev['event']}: {when}")
     if events:
@@ -712,6 +731,10 @@ def _format_case(c: dict, term: str, docket: str) -> str:
 async def list_term_cases(term: str, limit: int = 60) -> str:
     """List the Supreme Court cases from a given Term.
 
+    Each line gives the docket number to pass to get_case. Where cases in the
+    Term share one (Brown I and Brown II are both "No. 1"), the line gives the
+    get_case call that reaches that case instead.
+
     Args:
         term: The Term year - the year the Term began, e.g. "2014" for OT2014
             (October 2014 through June/July 2015).
@@ -726,17 +749,27 @@ async def list_term_cases(term: str, limit: int = 60) -> str:
         return f"No cases found for Term {term}."
 
     total = len(data)
+    # A docket number shared in the Term cannot reach one case by itself.
+    shared = {d for d, n in Counter(_norm_docket(c.get("docket_number")) for c in data).items()
+              if d and n > 1}
     rows = []
     for case in data[:limit]:
         if not case:
             continue
         nm = case.get("name") or "(untitled)"
         dk = case.get("docket_number") or "?"
-        rows.append(f"- {nm} — No. {dk}")
+        row = f"- {nm} — No. {dk}"
+        path = _case_path(case)
+        if _norm_docket(dk) in shared and "/" in path:
+            p_term, p_docket = path.split("/", 1)
+            row += f' -> get_case(term="{p_term}", docket="{p_docket}")'
+        rows.append(row)
     shown = len(rows)
     header = f"Term {term}: {total} case(s)"
     header += f" (showing {shown})" if shown < total else ""
     footer = "\n\nUse get_case(term, docket) for any of these."
+    if shared:
+        footer += " Where a line shows its own get_case call, use that."
     return header + ":\n" + "\n".join(rows) + footer
 
 
@@ -924,6 +957,10 @@ async def _render_media(
             note = _text((media.get("public_note") or "")) or "transcript unavailable"
             body.append(f"_({note})_")
             continue
+        if media.get("damaged"):
+            note = _text(media.get("public_note") or "")
+            body.append("_(Oyez marks this recording as damaged"
+                        + (f": {note}" if note else "") + "; parts may be missing.)_")
         for sec in tr.get("sections") or []:
             if truncated:
                 break

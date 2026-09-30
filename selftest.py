@@ -22,6 +22,9 @@ def text_of(result):
 
 
 async def main():
+    # Output is UTF-8 whatever the console or pipe would default to; on
+    # Windows a piped run otherwise writes the server's em dashes as cp1252.
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     params = StdioServerParameters(command=sys.executable, args=[SERVER])
     async with stdio_client(params) as (read, write):
         async with ClientSession(read, write) as session:
@@ -60,7 +63,7 @@ async def main():
             found = None
             for term in (str(term_year), str(term_year - 1)):
                 r = await session.call_tool("list_term_cases", {"term": term, "limit": 1})
-                m = re.search(r"^- (.+?) \u2014 No\. (\S+)$", text_of(r), re.M)
+                m = re.search(r"^- (.+?) \u2014 No\. (\S+)(?: -> .*)?$", text_of(r), re.M)
                 if m:
                     found = (term, m.group(1), m.group(2))
                     break
@@ -77,7 +80,7 @@ async def main():
             # after the window rolls forward in October.
             back2 = str(term_year - 2)
             r = await session.call_tool("list_term_cases", {"term": back2, "limit": 1})
-            m = re.search(r"^- (.+?) — No\. (\S+)$", text_of(r), re.M)
+            m = re.search(r"^- (.+?) — No\. (\S+)(?: -> .*)?$", text_of(r), re.M)
             if not m:
                 sys.exit(f"FAIL  no case could be read from the Term {back2} list")
             name, docket = m.group(1), m.group(2)
@@ -102,6 +105,23 @@ async def main():
             if "Decided: May 17, 1954" not in out:
                 sys.exit("FAIL  get_case(Brown I) lost its pre-1970 dates:\n" + out)
             print("OK  pre-1970 dates survive (Brown I, decided May 17, 1954)")
+            if "Argued: December 9, 1952; December 10, 1952; December 11, 1952" not in out:
+                sys.exit("FAIL  get_case(Brown I) did not give every day of argument:\n" + out)
+            print("OK  a multi-day argument lists every day (Brown I, December 9-11, 1952)")
+
+            # Brown I and II share "No. 1", so the Term list has to give the call
+            # that reaches each one.
+            out = text_of(await session.call_tool(
+                "list_term_cases", {"term": "1940-1955", "limit": 400}))
+            if 'get_case(term="1940-1955", docket="347us483")' not in out:
+                sys.exit("FAIL  list_term_cases did not give Brown I's own get_case call:\n" + out)
+            print("OK  a shared docket in a Term list comes with its own get_case call")
+
+            out = text_of(await session.call_tool(
+                "search_cases", {"query": "brown v board of education", "limit": 1}))
+            if "Brown v. Board of Education of Topeka" not in out:
+                sys.exit("FAIL  search_cases capitalized a small word in a case name:\n" + out)
+            print("OK  small words stay lowercase in a searched case name")
 
             # Bakke reports "Term 1977" and lives at 1979/76-811, so the pair
             # search_cases prints does not resolve on its own.
