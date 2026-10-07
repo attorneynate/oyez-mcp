@@ -8,6 +8,8 @@ Justice.
 Data comes from the public Oyez API (`api.oyez.org`) and Oyez's search backend
 (`beta-search.oyez.org`). **No account or API key is required.**
 
+No MCP client? The same tools also run as a [page in your browser](#use-it-in-a-browser).
+
 > Using the oyez tools, pull the Obergefell oral argument and show me only Justice
 > Scalia's questions.
 

@@ -1,4 +1,5 @@
-"""Quick check that the Oyez MCP server starts and answers over stdio.
+"""Quick check that the Oyez MCP server starts and answers over stdio, and
+that the browser page's API (ui.py) reaches the same tools.
 
 Run it with the project's own venv Python:
     Windows:      .\\.venv\\Scripts\\python.exe selftest.py
