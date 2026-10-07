@@ -110,7 +110,8 @@ truncated transcript: it names the `part` and `start` to continue from. Raise
 ## Requirements
 
 - An MCP client — Claude Code (CLI or the desktop app's Code tab), Claude Desktop, or
-  anything else that speaks MCP over stdio
+  anything else that speaks MCP over stdio. Or none at all: the
+  [browser page](#use-it-in-a-browser) needs only a web browser.
 - [uv](https://docs.astral.sh/uv/), or Python 3.10 or newer
 
 ## Install
@@ -237,6 +238,32 @@ On Windows, JSON needs the backslashes doubled:
 Restart the client afterward. Neither config expands `~` or other shell shortcuts —
 use full absolute paths.
 
+## Use it in a browser
+
+The same five tools also come as a web page that runs on your own computer, for
+reading cases and transcripts without an MCP client:
+
+```bash
+uvx --from git+https://github.com/attorneynate/oyez-mcp oyez-ui
+```
+
+From a clone, run `python ui.py` with the venv's Python instead. Your browser opens
+on the page, and Ctrl+C in the terminal stops it.
+
+- **Search** by case name, party, or docket number, or **browse a Term** with each
+  case's one-line holding. Click a case to open it.
+- **Case** shows the facts, question, conclusion, each Justice's vote, the written
+  opinions, and links to Oyez and Justia.
+- **Oral argument** and **Announcement** show the transcripts. Filter by speaker
+  (or click a name in the roster), by Justices or advocates, or by a word, and show
+  timestamps if you want them. A long transcript loads a chunk at a time; **Load
+  more** picks up where it stopped.
+- The address bar holds the case and tab, so a view can be bookmarked.
+
+The page listens on `127.0.0.1` only, port 8765 or a free one if that is taken
+(`--port` picks another, `--no-browser` skips opening a tab). Nothing else on your
+network can reach it, and it has no login because it needs none.
+
 ## Example prompts
 
 - "Using the oyez tools, pull the Obergefell oral argument and show me only Justice Scalia's questions."
@@ -279,6 +306,10 @@ oyez.org's own front end uses, then formats the JSON into Markdown for the model
 rather than passing raw API responses through: a decision becomes a list of each
 Justice's vote, what they wrote, and whose opinions they joined, and transcripts
 become `Speaker: text` turns.
+
+`ui.py` is the browser page: a small Starlette app, served by uvicorn (both come
+with `mcp`), that calls those same tool functions and renders their Markdown. It
+adds no Oyez logic of its own.
 
 There is no database, and every tool call is a live HTTP request, with one exception:
 a Term's case list, once fetched, is kept in memory for ten minutes. That covers the

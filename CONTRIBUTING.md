@@ -41,7 +41,12 @@ oyez.org and wrong here.
 
 - Match the style already in `server.py`: type hints, small helpers, no new
   dependencies unless there is no other way. It is currently `mcp` and `httpx`, and
-  keeping it there is a feature.
+  keeping it there is a feature. `ui.py` uses `starlette` and `uvicorn`, which
+  `mcp` already installs.
+- The browser page in `ui.py` renders the tools' own Markdown and turns their
+  `get_case(...)` calls and truncation notes into links and buttons. If you change
+  how a tool writes its result rows, the docket line, or the truncation note, check
+  the page too; `selftest.py` covers its API but not its rendering.
 - Register a tool with `@_tool("Title")`, not `@app.tool()`. It marks the tool
   read-only and turns off structured output, which would otherwise send every
   answer twice.

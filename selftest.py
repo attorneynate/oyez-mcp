@@ -280,8 +280,46 @@ async def main():
                 sys.exit(f"FAIL  start={m.group(2)!r} did not resume at that turn:\n" + out2[:600])
             print(f"OK  a truncated transcript says where to continue, and start resumes there ({m.group(2)})")
 
+    await check_ui()
+
     print("\nAll good. Now register it:\n"
           "  claude mcp add --scope user oyez -- <venv-python> <path-to-server.py>")
+
+
+async def check_ui():
+    """The web page's API, called in-process: it reaches the same tools and
+    refuses what it should."""
+    import httpx
+    import ui
+
+    transport = httpx.ASGITransport(app=ui.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as web:
+        r = await web.get("/")
+        if r.status_code != 200 or "<title>Oyez Browser</title>" not in r.text:
+            sys.exit(f"FAIL  the UI page did not load ({r.status_code})")
+
+        r = await web.get("/api/get_case", params={"term": "2014", "docket": "14-556"})
+        if r.status_code != 200 or "Obergefell" not in r.json().get("markdown", ""):
+            sys.exit(f"FAIL  the UI's get_case did not return Obergefell ({r.status_code}):\n{r.text[:400]}")
+        r = await web.get("/api/get_oral_argument", params={
+            "term": "2014", "docket": "14-556", "speaker": "Scalia",
+            "include_timestamps": "true", "max_chars": "1000"})
+        md = r.json().get("markdown", "") if r.status_code == 200 else ""
+        if not re.search(r"^\[[\d:]+\] Antonin Scalia: ", md, re.M):
+            sys.exit(f"FAIL  the UI's get_oral_argument did not pass its filters ({r.status_code}):\n{md[:400]}")
+        print("OK  the UI page loads and its API reaches the tools")
+
+        refused = {
+            "an unknown tool": await web.get("/api/delete_everything"),
+            "a missing argument": await web.get("/api/get_case", params={"term": "2014"}),
+            "an unknown argument": await web.get("/api/get_case", params={"term": "2014", "docket": "1", "x": "1"}),
+            "a bad number": await web.get("/api/search_cases", params={"query": "x", "limit": "ten"}),
+            "another host name": await web.get("/", headers={"Host": "attacker.example"}),
+        }
+        for what, resp in refused.items():
+            if resp.status_code < 400:
+                sys.exit(f"FAIL  the UI accepted {what} ({resp.status_code})")
+        print("OK  the UI refuses unknown tools and arguments, bad values, and other host names")
 
 
 if __name__ == "__main__":

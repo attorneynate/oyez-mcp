@@ -46,7 +46,7 @@ SEARCH_FIELDS = [
     "field_question:value",
     "field_conclusion:value",
 ]
-VERSION = "1.3"
+VERSION = "1.4"
 USER_AGENT = f"oyez-mcp/{VERSION} (Claude Code MCP server)"
 
 # Oyez's search index runs well behind its case data (in September 2026 it had
