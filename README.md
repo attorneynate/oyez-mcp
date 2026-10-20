@@ -8,7 +8,8 @@ Justice.
 Data comes from the public Oyez API (`api.oyez.org`) and Oyez's search backend
 (`beta-search.oyez.org`). **No account or API key is required.**
 
-No MCP client? The same tools also run as a [page in your browser](#use-it-in-a-browser).
+No MCP client? The same tools also run as a [page in your browser](#use-it-in-a-browser),
+or as a [desktop app](#as-a-desktop-app) you open from an icon.
 
 > Using the oyez tools, pull the Obergefell oral argument and show me only Justice
 > Scalia's questions.
@@ -266,6 +267,33 @@ The page listens on `127.0.0.1` only, port 8765 or a free one if that is taken
 (`--port` picks another, `--no-browser` skips opening a tab). Nothing else on your
 network can reach it, and it has no login because it needs none.
 
+### As a desktop app
+
+The same page also opens in a window of its own, with its own icon in the Start
+menu, on the desktop, and on the taskbar. Closing the window stops it; there is no
+terminal to keep open. It uses pywebview, an optional extra, and on Windows the
+window is WebView2, which Windows 11 already has.
+
+Install it once, as a tool that stays put, then make the shortcuts:
+
+```bash
+uv tool install "oyez-mcp[desktop] @ git+https://github.com/attorneynate/oyez-mcp"
+```
+
+```bash
+oyez-desktop --install
+```
+
+From a clone, run `pip install pywebview` in the venv, then
+`python desktop.py --install` with the venv's Python. The shortcuts point at the
+Python environment that made them, so make them from an install you mean to keep —
+`uv tool install` or a clone — rather than a one-off `uvx` run, whose cached
+environment can be cleared. `oyez-desktop --remove-shortcuts` takes them away, and
+`oyez-desktop` alone opens the window without them.
+
+Shortcuts are Windows only. On macOS and Linux, `oyez-desktop` opens the window
+when pywebview has what it needs there (see pywebview's docs).
+
 ## Example prompts
 
 - "Using the oyez tools, pull the Obergefell oral argument and show me only Justice Scalia's questions."
@@ -311,7 +339,9 @@ become `Speaker: text` turns.
 
 `ui.py` is the browser page: a small Starlette app, served by uvicorn (both come
 with `mcp`), that calls those same tool functions and renders their Markdown. It
-adds no Oyez logic of its own.
+adds no Oyez logic of its own. `desktop.py` runs that app on a free port in a
+background thread and shows it in a pywebview window, which it stops when the
+window closes; its icon is embedded in it as base64.
 
 There is no database, and every tool call is a live HTTP request, with one exception:
 a Term's case list, once fetched, is kept in memory for ten minutes. That covers the

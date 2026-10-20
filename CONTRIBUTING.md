@@ -42,7 +42,9 @@ oyez.org and wrong here.
 - Match the style already in `server.py`: type hints, small helpers, no new
   dependencies unless there is no other way. It is currently `mcp` and `httpx`, and
   keeping it there is a feature. `ui.py` uses `starlette` and `uvicorn`, which
-  `mcp` already installs.
+  `mcp` already installs. `desktop.py` needs `pywebview`, so it is an optional
+  extra (`oyez-mcp[desktop]`) and is imported only when a window opens; keep it
+  that way, so the server and the selftest never need it.
 - The browser page in `ui.py` renders the tools' own Markdown and turns their
   `get_case(...)` calls and truncation notes into links and buttons. If you change
   how a tool writes its result rows, the docket line, or the truncation note, check

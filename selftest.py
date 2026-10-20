@@ -1,5 +1,6 @@
-"""Quick check that the Oyez MCP server starts and answers over stdio, and
-that the browser page's API (ui.py) reaches the same tools.
+"""Quick check that the Oyez MCP server starts and answers over stdio, that
+the browser page's API (ui.py) reaches the same tools, and that the desktop
+app (desktop.py) loads without its optional pywebview.
 
 Run it with the project's own venv Python:
     Windows:      .\\.venv\\Scripts\\python.exe selftest.py
@@ -321,6 +322,15 @@ async def check_ui():
             if resp.status_code < 400:
                 sys.exit(f"FAIL  the UI accepted {what} ({resp.status_code})")
         print("OK  the UI refuses unknown tools and arguments, bad values, and other host names")
+
+    # The desktop app imports pywebview only when it opens a window, so the
+    # module loads without the extra, and its embedded icon is a real .ico.
+    import base64
+    import desktop
+
+    if base64.b64decode(desktop.ICON)[:4] != b"\x00\x00\x01\x00":
+        sys.exit("FAIL  desktop.ICON is not an .ico file")
+    print("OK  the desktop app loads, and its icon is an .ico")
 
 
 if __name__ == "__main__":

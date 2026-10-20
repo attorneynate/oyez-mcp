@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "oyez-mcp"
-version = "1.4"
-description = "MCP server and browser page for the Oyez archive of U.S. Supreme Court cases, decisions, and oral-argument transcripts"
+version = "1.5"
+description = "MCP server, browser page, and desktop app for the Oyez archive of U.S. Supreme Court cases, decisions, and oral-argument transcripts"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
@@ -27,12 +27,19 @@ classifiers = [
 Homepage = "https://github.com/attorneynate/oyez-mcp"
 Issues = "https://github.com/attorneynate/oyez-mcp/issues"
 
+# The desktop window is optional, so the MCP server keeps its two
+# dependencies: install "oyez-mcp[desktop]" to get it.
+[project.optional-dependencies]
+desktop = ["pywebview>=5"]
+
 # The command a client registers. It is server.main(), the same thing
-# `python server.py` runs. oyez-ui is the same tools as a local web page.
+# `python server.py` runs. oyez-ui is the same tools as a local web page, and
+# oyez-desktop is that page in a window of its own.
 [project.scripts]
 oyez-mcp = "server:main"
 oyez-ui = "ui:main"
+oyez-desktop = "desktop:main"
 
 # The modules at the repo root, and only those: selftest.py stays out.
 [tool.setuptools]
-py-modules = ["server", "ui"]
+py-modules = ["server", "ui", "desktop"]
