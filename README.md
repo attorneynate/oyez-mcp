@@ -285,6 +285,12 @@ uv tool install --managed-python "oyez-mcp[desktop] @ git+https://github.com/att
 oyez-desktop --install
 ```
 
+If the second command is "not recognized", uv's tool folder isn't on your PATH yet;
+the install says so in a warning. Run it by its full path instead, which on Windows
+is `& "$HOME\.local\bin\oyez-desktop.exe" --install` in PowerShell, or run
+`uv tool update-shell` once and open a new terminal. The shortcuts don't need the
+PATH; they point straight at the installed app.
+
 `--managed-python` matters on Windows. The Microsoft Store's Python, and a terminal
 running inside some packaged desktop apps, have what they write under `AppData`
 kept in a private folder of their own, where Explorer and the Start menu never
@@ -315,6 +321,9 @@ when pywebview has what it needs there (see pywebview's docs).
 
 ## Troubleshooting
 
+- **`oyez-desktop` is "not recognized".** `uv tool install` put it in a folder that
+  isn't on your PATH. Run `uv tool update-shell` and open a new terminal, or call it
+  by its full path, `$HOME\.local\bin\oyez-desktop.exe` on Windows.
 - **The desktop app's Start menu entry or icon is missing.** The shortcuts were
   made from the Microsoft Store's Python or from a terminal inside another app, and
   Windows kept them in that app's private folder. Make them again from Windows
