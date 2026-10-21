@@ -11,6 +11,7 @@ import os
 import re
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
@@ -331,6 +332,15 @@ async def check_ui():
     if base64.b64decode(desktop.ICON)[:4] != b"\x00\x00\x01\x00":
         sys.exit("FAIL  desktop.ICON is not an .ico file")
     print("OK  the desktop app loads, and its icon is an .ico")
+
+    # Its icon and log live where no packaged app's AppData redirect reaches,
+    # and a file left in place is not reported as redirected.
+    data = desktop._data_dir()
+    if data.parent != Path.home():
+        sys.exit(f"FAIL  the desktop app keeps its files in {data}, not the home folder")
+    if desktop._redirected_to(Path(__file__)) is not None:
+        sys.exit("FAIL  _redirected_to reports a file in place as redirected")
+    print("OK  the desktop app's files stay out of AppData, and redirects are told apart")
 
 
 if __name__ == "__main__":

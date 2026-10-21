@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Oyez Desktop - the browser page in a window of its own.
+r"""Oyez Desktop - the browser page in a window of its own.
 
     oyez-desktop                      open the window
     oyez-desktop --install            add Start menu and desktop shortcuts (Windows)
@@ -9,10 +9,10 @@ The page and its server run in this one process, so closing the window stops
 both. It needs pywebview, an optional extra, so the MCP server itself keeps
 its two dependencies:
 
-    uv tool install "oyez-mcp[desktop] @ git+https://github.com/attorneynate/oyez-mcp"
+    uv tool install --managed-python "oyez-mcp[desktop] @ git+https://github.com/attorneynate/oyez-mcp"
 
-or `pip install pywebview` in a clone's venv. On Windows the window is
-WebView2, which Windows 11 includes.
+On Windows the window is WebView2, which Windows 11 includes. When it cannot
+open, it says why in a message box and in ~\.oyez-mcp\desktop.log.
 """
 from __future__ import annotations
 
@@ -20,9 +20,11 @@ import argparse
 import base64
 import ctypes
 import os
+import re
 import sys
 import threading
 import time
+import traceback
 from pathlib import Path
 
 import uvicorn
@@ -33,14 +35,26 @@ APP_NAME = "Oyez Browser"
 # Windows groups a running window with the shortcut that has the same ID, so
 # the taskbar shows this app's icon rather than Python's.
 APP_ID = "attorneynate.OyezBrowser"
-INSTALL_HINT = ('Install it with:\n  uv tool install "oyez-mcp[desktop] @ '
-                'git+https://github.com/attorneynate/oyez-mcp"\nor, in a clone\'s venv, '
-                "pip install pywebview")
+INSTALL_HINT = ('Install it with:\n  uv tool install --managed-python "oyez-mcp[desktop] @ '
+                'git+https://github.com/attorneynate/oyez-mcp"')
+
+_REDIRECT_FIX = (
+    "Make the shortcuts from a terminal of its own (Windows Terminal, not one inside "
+    "another app) with a Python that is not the Microsoft Store's:\n"
+    '  uv tool install --managed-python "oyez-mcp[desktop] @ '
+    'git+https://github.com/attorneynate/oyez-mcp"\n'
+    "  oyez-desktop --install")
+
+# A shortcut starts this under pythonw, with no console, so sys.stdout and
+# sys.stderr are None. That has to be noted here, before pywebview loads:
+# importing it swaps them for os.devnull, which would hide every error.
+_WINDOWLESS = sys.stdout is None or sys.stderr is None
 
 
 def _data_dir() -> Path:
-    base = os.environ.get("LOCALAPPDATA") or os.path.join(Path.home(), ".local", "share")
-    path = Path(base) / "oyez-mcp"
+    # The home folder, not AppData: Windows can quietly move what some
+    # processes write under AppData out of Explorer's sight (see _redirected_to).
+    path = Path.home() / ".oyez-mcp"
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -55,25 +69,52 @@ def _icon_path() -> Path:
 
 
 def _say(message: str, error: bool = False) -> None:
-    """Print, or under pythonw, where there is no console, show a message box."""
-    if sys.stdout is not None:
-        print(message, file=sys.stderr if error else sys.stdout)
-    elif sys.platform == "win32":
+    """Print, or with no console to print to, show a message box."""
+    if _WINDOWLESS and sys.platform == "win32":
         flags = 0x10 if error else 0x40  # MB_ICONERROR / MB_ICONINFORMATION
         ctypes.windll.user32.MessageBoxW(None, message, APP_NAME, flags)
+    else:
+        print(message, file=sys.stderr if error else sys.stdout)
+
+
+def _redirected_to(path: Path) -> str | None:
+    """The packaged app whose private folder Windows really put this file in,
+    or None if it is where it was asked to be.
+
+    A process that is a packaged app (the Microsoft Store's Python) or runs
+    inside one (a terminal in some desktop apps) has what it writes under
+    AppData kept in that package's own LocalCache instead, where Explorer and
+    the Start menu never look. The process itself sees the file in place; only
+    its real path gives it away.
+    """
+    real = os.path.realpath(path)
+    if os.path.normcase(real) == os.path.normcase(os.path.abspath(path)):
+        return None
+    m = re.search(r"\\Packages\\([^\\]+)\\LocalCache\\", real, re.IGNORECASE)
+    return m.group(1) if m else None
 
 
 def run() -> None:
+    """Open the window, and if it cannot open, say why rather than vanish."""
+    log = _data_dir() / "desktop.log"
+    if _WINDOWLESS:
+        # What the server or a traceback would print, overwritten each start.
+        sys.stdout = sys.stderr = open(log, "w", encoding="utf-8", buffering=1)
+    try:
+        _open_window()
+    except Exception as e:  # noqa: BLE001
+        traceback.print_exc()
+        _say(f"{APP_NAME} could not open.\n\n{type(e).__name__}: {e}"
+             + (f"\n\nDetails are in {log}" if _WINDOWLESS else ""), error=True)
+        sys.exit(1)
+
+
+def _open_window() -> None:
     try:
         import webview
     except ImportError:
         _say("Oyez Desktop needs pywebview. " + INSTALL_HINT, error=True)
         sys.exit(1)
-
-    # A shortcut starts this under pythonw, with no console. Send what the
-    # server would have printed to a log, overwritten on each start.
-    if sys.stderr is None:
-        sys.stdout = sys.stderr = open(_data_dir() / "desktop.log", "w", encoding="utf-8")
     if sys.platform == "win32":
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_ID)
 
@@ -81,15 +122,13 @@ def run() -> None:
     srv = uvicorn.Server(uvicorn.Config(ui.app, host="127.0.0.1", port=port, log_level="warning"))
     thread = threading.Thread(target=srv.run, daemon=True)
     thread.start()
-    for _ in range(100):  # up to ten seconds
+    # Generous, for a cold start after a restart while antivirus scans.
+    for _ in range(300):  # up to thirty seconds
         if srv.started or not thread.is_alive():
             break
         time.sleep(0.1)
     if not srv.started:
-        log = _data_dir() / "desktop.log"
-        _say("The page's server did not start."
-             + (f" Details are in {log}" if log.is_file() else ""), error=True)
-        sys.exit(1)
+        raise RuntimeError("the page's server did not start")
 
     webview.create_window(
         APP_NAME, f"http://127.0.0.1:{port}/", width=1200, height=860, min_size=(640, 480),
@@ -112,8 +151,8 @@ def install_shortcuts() -> None:
     """Start menu and desktop shortcuts that open the window with no console.
 
     They point at this Python environment and this file, so make them from
-    the install you mean to keep: a clone's venv, or `uv tool install`, not a
-    one-off `uvx` run whose cached environment can be cleared.
+    the install you mean to keep: `uv tool install`, not a one-off `uvx` run
+    whose cached environment can be cleared.
     """
     if sys.platform != "win32":
         _say("Shortcuts are made on Windows only. Elsewhere, run oyez-desktop.", error=True)
@@ -132,6 +171,16 @@ def install_shortcuts() -> None:
         pythonw = Path(sys.executable)
     script = Path(__file__).resolve()
     icon = _icon_path()
+    # A shortcut to a Python that lives in some app's private folder would
+    # point at nothing as far as Explorer is concerned.
+    for target in (pythonw, script):
+        owner = _redirected_to(target)
+        if owner:
+            _say(f"{target} is in the private folder of {owner}, which Explorer cannot "
+                 "see, so a shortcut to it would not open. " + _REDIRECT_FIX, error=True)
+            sys.exit(1)
+
+    missed = []
     for path in _shortcut_paths():
         link = pythoncom.CoCreateInstance(
             shell.CLSID_ShellLink, None, pythoncom.CLSCTX_INPROC_SERVER, shell.IID_IShellLink)
@@ -144,7 +193,18 @@ def install_shortcuts() -> None:
         store.SetValue(pscon.PKEY_AppUserModel_ID, propsys.PROPVARIANTType(APP_ID, pythoncom.VT_LPWSTR))
         store.Commit()
         link.QueryInterface(pythoncom.IID_IPersistFile).Save(str(path), 0)
-        print(f"Made {path}")
+        owner = _redirected_to(path)
+        if owner:
+            # Saved, but into a private folder: don't leave it there or call it made.
+            os.remove(path)
+            missed.append((path, owner))
+        else:
+            print(f"Made {path}")
+    for path, owner in missed:
+        _say(f"Did not make {path}: Windows stored it in the private folder of {owner}, "
+             "where the Start menu never looks. " + _REDIRECT_FIX, error=True)
+    if missed:
+        sys.exit(1)
 
 
 def remove_shortcuts() -> None:

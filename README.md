@@ -274,22 +274,31 @@ menu, on the desktop, and on the taskbar. Closing the window stops it; there is 
 terminal to keep open. It uses pywebview, an optional extra, and on Windows the
 window is WebView2, which Windows 11 already has.
 
-Install it once, as a tool that stays put, then make the shortcuts:
+Install it once, as a tool that stays put, then make the shortcuts. Run both in a
+terminal of its own, such as Windows Terminal, not one inside another app:
 
 ```bash
-uv tool install "oyez-mcp[desktop] @ git+https://github.com/attorneynate/oyez-mcp"
+uv tool install --managed-python "oyez-mcp[desktop] @ git+https://github.com/attorneynate/oyez-mcp"
 ```
 
 ```bash
 oyez-desktop --install
 ```
 
-From a clone, run `pip install pywebview` in the venv, then
-`python desktop.py --install` with the venv's Python. The shortcuts point at the
-Python environment that made them, so make them from an install you mean to keep —
-`uv tool install` or a clone — rather than a one-off `uvx` run, whose cached
-environment can be cleared. `oyez-desktop --remove-shortcuts` takes them away, and
-`oyez-desktop` alone opens the window without them.
+`--managed-python` matters on Windows. The Microsoft Store's Python, and a terminal
+running inside some packaged desktop apps, have what they write under `AppData`
+kept in a private folder of their own, where Explorer and the Start menu never
+look. `oyez-desktop --install` checks where each shortcut really landed and says so
+when Windows moved it, rather than reporting a shortcut that isn't there.
+
+The shortcuts point at the Python environment that made them, so make them from an
+install you mean to keep, not a one-off `uvx` run, whose cached environment can be
+cleared. `oyez-desktop --remove-shortcuts` takes them away, and `oyez-desktop` alone
+opens the window without them. From a clone, install `pywebview` in the venv and run
+`python desktop.py` with the venv's Python.
+
+If the window cannot open, it says why in a message box, and the details are in
+`desktop.log` in the `.oyez-mcp` folder in your home folder, beside the app's icon.
 
 Shortcuts are Windows only. On macOS and Linux, `oyez-desktop` opens the window
 when pywebview has what it needs there (see pywebview's docs).
@@ -306,6 +315,11 @@ when pywebview has what it needs there (see pywebview's docs).
 
 ## Troubleshooting
 
+- **The desktop app's Start menu entry or icon is missing.** The shortcuts were
+  made from the Microsoft Store's Python or from a terminal inside another app, and
+  Windows kept them in that app's private folder. Make them again from Windows
+  Terminal, after installing with `--managed-python` as in
+  [As a desktop app](#as-a-desktop-app).
 - **Slow first start.** A stdio server's first launch can exceed Claude Code's
   30-second startup timeout, and `uvx`'s first start also fetches and builds the
   package. Raise it with the `MCP_TIMEOUT` environment variable, in milliseconds —

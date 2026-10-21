@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "oyez-mcp"
-version = "1.5"
+version = "1.5.1"
 description = "MCP server, browser page, and desktop app for the Oyez archive of U.S. Supreme Court cases, decisions, and oral-argument transcripts"
 readme = "README.md"
 license = "MIT"
