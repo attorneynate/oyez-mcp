@@ -8,11 +8,35 @@ Justice.
 Data comes from the public Oyez API (`api.oyez.org`) and Oyez's search backend
 (`beta-search.oyez.org`). **No account or API key is required.**
 
-No MCP client? The same tools also run as a [page in your browser](#use-it-in-a-browser),
-or as a [desktop app](#as-a-desktop-app) you open from an icon.
-
 > Using the oyez tools, pull the Obergefell oral argument and show me only Justice
 > Scalia's questions.
+
+## Do you need Claude?
+
+Only for the MCP server. The project comes in three forms, and two of them work on
+their own:
+
+| Form | Needs Claude? |
+|------|---------------|
+| **MCP server** (`oyez-mcp`) | Yes, or another MCP client. It is how an assistant gets the Oyez tools. |
+| **[Browser page](#use-it-in-a-browser)** (`oyez-ui`) | No. It runs on your computer and opens in any browser. |
+| **[Desktop app](#as-a-desktop-app)** (`oyez-desktop`) | No. The same page in a window of its own, opened from an icon. |
+
+The page and the app call the same search and transcript code the MCP server does,
+directly, with no AI in between. There is no account, sign-in, or API key. They do
+need:
+
+- **[uv](https://docs.astral.sh/uv/)**, a free one-time install that sets up the app
+  and its own Python.
+- **An internet connection while you use them.** They run on your computer but fetch
+  each case and transcript live from Oyez; nothing is downloaded ahead of time, so
+  they do not work offline.
+
+Without an assistant you get the archive as Oyez provides it: search, case
+summaries, votes, links to the written opinions, and transcripts you can filter by
+speaker or word. You don't get the assistant's part: asking a question in plain
+English, summarizing an argument, or comparing cases. The summaries you see are
+Oyez's own, written by its editors.
 
 ## Tools
 
